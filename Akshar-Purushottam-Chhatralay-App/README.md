@@ -9,6 +9,8 @@ A complete starter with a React frontend, FastAPI backend and PostgreSQL databas
 - Tenant-only personal balance and rent history
 - Admin view of every pending balance
 - Admin view of all tenants and their outstanding balances
+- Admin-only personal details, references, charge history, and payment history for each tenant
+- Create rent charges for every active tenant on one due date using each tenant's saved weekly rent; email notices are queued for each tenant
 - Tenant payment submissions with optional private receipt image (JPG, PNG, WebP, max 2 MB)
 - Admin approval or rejection; balance updates only on approval; duplicate bank references rejected per tenant
 - Email notices for new tenant accounts, rent charges, payment submissions and decisions, poll votes, and activities
@@ -71,6 +73,10 @@ When deploying, set VITE_API_URL to the backend URL, FRONTEND_URLS to the fronte
 5. Test one tenant with a small rent charge: submit a payment and image, confirm status Pending and no balance change, approve it, and check the balance changes once. Submit another and reject it; confirm the balance stays unchanged. Confirm mail reaches tenant, admin, and any additional recipient. Test an activity announcement. The backend receipt endpoint requires admin authentication.
 
 Existing unregistered tenants need a registration code: sign in as admin and click **Email code** beside their name. Existing registered tenants can keep logging in. Do not publish this update before the email API and sender domain are configured if tenants still need to register.
+
+### Bulk rent workflow
+
+On the admin dashboard, click **View details** beside a tenant to see their address, reference contacts, bond, charge history and payment submissions. Use **Charge all active tenants** to choose one due date. The system makes one charge per currently active tenant using that tenant's saved weekly rent, and queues email notices after saving. The same due date cannot be submitted through this bulk form twice. This action does not charge a bank account or send future recurring reminders automatically; repeat it for the next rent period. Individual charges remain available for adjustments. Ensure `EMAIL_FROM` uses your verified Resend domain before relying on email notifications; the backend will log failed deliveries.
 
 The existing `docker-compose.yml` in the uploaded ZIP included a real admin password and JWT key. This revision removes them; rotate any values that were committed to GitHub or shared. **Changing `ADMIN_PASSWORD` in Render does not change the password of an existing admin account**: sign in and use **Email recipients → Change admin password** after deploying. Also rotate `SECRET_KEY` in Render, which signs users out. Removing a password from the current file does not remove it from Git history.
 

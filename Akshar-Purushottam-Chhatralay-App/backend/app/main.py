@@ -67,6 +67,11 @@ class RentCharge(Base):
     note: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class BulkRentRun(Base):
+    __tablename__ = "bulk_rent_runs"
+    due_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class Activity(Base):
     __tablename__ = "activities"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -152,7 +157,7 @@ def send_email(recipients: list[str], subject: str, body: str):
         try:
             request=urllib.request.Request("https://api.resend.com/emails",
                 data=json.dumps({"from":sender,"to":[recipient],"subject":subject,"text":body}).encode(),
-                headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},method="POST")
+                headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"apc-perth/1.0"},method="POST")
             with urllib.request.urlopen(request, timeout=15) as response:
                 if response.status>=300: raise RuntimeError("Email provider rejected request")
         except Exception:
@@ -207,6 +212,8 @@ class TenantIn(BaseModel):
     reference_name: str=""; reference_phone: str=""; reference_email: str=""
 class ChargeIn(BaseModel):
     tenant_id: int; due_date: date; amount: float=Field(gt=0); note: str=""
+class BulkChargeIn(BaseModel):
+    due_date: date
 class PaymentIn(BaseModel):
     amount_paid: float=Field(ge=0)
 class ActivityIn(BaseModel):
@@ -282,6 +289,20 @@ def dashboard(_:User=Depends(admin),db:Session=Depends(db_session)):
         rows.append({"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,"registered":bool(t.user_id),"weekly_rent":float(t.weekly_rent),"balance":balance})
     return {"tenants":rows,"pending":[r for r in rows if r["balance"]>0],"total_outstanding":sum(r["balance"] for r in rows)}
 
+@app.get("/api/admin/tenants/{tenant_id}")
+def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant_id).order_by(RentCharge.due_date.desc(),RentCharge.id.desc())).all()
+    payments=db.scalars(select(PaymentSubmission).where(PaymentSubmission.tenant_id==tenant_id).order_by(PaymentSubmission.id.desc())).all()
+    return {"id":tenant.id,"full_name":tenant.full_name,"email":tenant.email,"phone":tenant.phone,
+            "current_address":tenant.current_address,"room":tenant.room,"move_in_date":tenant.move_in_date,
+            "weekly_rent":float(tenant.weekly_rent),"bond_amount":float(tenant.bond_amount),
+            "reference_name":tenant.reference_name,"reference_phone":tenant.reference_phone,
+            "reference_email":tenant.reference_email,"is_active":tenant.is_active,"registered":bool(tenant.user_id),
+            "charges":[{"id":c.id,"due_date":c.due_date,"amount":float(c.amount),"paid":float(c.amount_paid),"note":c.note} for c in charges],
+            "payments":[payment_json(p,tenant) for p in payments]}
+
 @app.post("/api/admin/tenants")
 def add_tenant(data:TenantIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
     if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"):
@@ -306,6 +327,23 @@ def add_charge(data:ChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Sess
     charge=RentCharge(**data.model_dump()); db.add(charge); db.commit()
     notify(db,tasks,[tenant.email],"Rent charge added",f"A rent charge of AUD {data.amount:.2f} was added for {tenant.full_name}. Sign in to see your balance.")
     return {"id":charge.id}
+
+@app.post("/api/admin/charges/all")
+def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True).order_by(Tenant.id)).all()
+    if not tenants: raise HTTPException(400,"Add an active tenant first")
+    if db.get(BulkRentRun,data.due_date): raise HTTPException(409,"Rent charges for this date were already created for all tenants")
+    db.add(BulkRentRun(due_date=data.due_date))
+    db.add_all([RentCharge(tenant_id=t.id,due_date=data.due_date,amount=t.weekly_rent,
+                           note="Rent due on "+data.due_date.isoformat()) for t in tenants])
+    try: db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,"Rent charges for this date were already created for all tenants")
+    for t in tenants:
+        notify(db,tasks,[t.email],"Rent due on "+data.due_date.isoformat(),
+               f"Hi {t.full_name}, your rent of AUD {t.weekly_rent:.2f} is due on {data.due_date}. Sign in to view your balance.")
+    return {"created":len(tenants),"due_date":data.due_date}
 
 @app.patch("/api/admin/charges/{charge_id}")
 def record_payment(charge_id:int,data:PaymentIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):

@@ -18,6 +18,32 @@ from app import main
 
 
 class PaymentFlow(unittest.TestCase):
+    def test_bulk_charges_and_tenant_details(self):
+        sent = []
+        main.send_email = lambda recipients, subject, body: sent.append((recipients, subject, body))
+        with TestClient(main.app) as client:
+            login = client.post("/api/auth/login", data={"username": "admin@example.com", "password": "test-admin-password"})
+            self.assertEqual(login.status_code, 200, login.text)
+            admin = {"Authorization": "Bearer " + login.json()["access_token"]}
+            ids = []
+            for number, rent in ((1, 125), (2, 175)):
+                response = client.post("/api/admin/tenants", headers=admin, json={
+                    "full_name": f"Bulk Tenant {number}", "email": f"bulk{number}@example.com", "phone": "0400000000",
+                    "current_address": "Perth", "room": str(number), "move_in_date": "2026-01-01",
+                    "weekly_rent": rent, "reference_name": "Ref Person"})
+                self.assertEqual(response.status_code, 200, response.text)
+                ids.append(response.json()["id"])
+            self.assertEqual(client.get(f"/api/admin/tenants/{ids[0]}").status_code, 401)
+            details = client.get(f"/api/admin/tenants/{ids[0]}", headers=admin)
+            self.assertEqual(details.json()["reference_name"], "Ref Person")
+            self.assertEqual(details.json()["current_address"], "Perth")
+            charge = client.post("/api/admin/charges/all", headers=admin, json={"due_date": "2026-12-01"})
+            self.assertEqual(charge.status_code, 200, charge.text)
+            self.assertEqual(charge.json()["created"], 2)
+            self.assertEqual(client.post("/api/admin/charges/all", headers=admin, json={"due_date": "2026-12-01"}).status_code, 409)
+            self.assertEqual([client.get(f"/api/admin/tenants/{i}", headers=admin).json()["charges"][0]["amount"] for i in ids], [125, 175])
+            self.assertTrue(any(subject == "Rent due on 2026-12-01" for _, subject, _ in sent))
+
     def test_review_and_receipt_permissions(self):
         sent = []
         main.send_email = lambda recipients, subject, body: sent.append((recipients, subject, body))
