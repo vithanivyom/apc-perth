@@ -67,6 +67,15 @@ class RentCharge(Base):
     note: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class ManualPayment(Base):
+    __tablename__ = "manual_payments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    charge_id: Mapped[int] = mapped_column(ForeignKey("rent_charges.id"))
+    amount: Mapped[Decimal] = mapped_column(Numeric(10,2))
+    payment_date: Mapped[date] = mapped_column(Date, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class BulkRentRun(Base):
     __tablename__ = "bulk_rent_runs"
     due_date: Mapped[date] = mapped_column(Date, primary_key=True)
@@ -216,6 +225,7 @@ class BulkChargeIn(BaseModel):
     due_date: date
 class PaymentIn(BaseModel):
     amount_paid: float=Field(ge=0)
+    payment_date: Optional[date]=None
 class ActivityIn(BaseModel):
     title: str; description: str=""; activity_date: date; poll_question: Optional[str]=None; options: list[str]=[]
 class VoteIn(BaseModel):
@@ -259,7 +269,7 @@ def register(data:RegisterIn, tasks:BackgroundTasks, db:Session=Depends(db_sessi
 @app.post("/api/auth/login")
 def login(form:OAuth2PasswordRequestForm=Depends(), db:Session=Depends(db_session)):
     user=db.scalar(select(User).where(func.lower(User.email)==form.username.lower()))
-    if not user or not pwd.verify(form.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
+    if not user or not user.is_active or not pwd.verify(form.password,user.password_hash): raise HTTPException(401,"Incorrect email or password or inactive account")
     return {"access_token":token_for(user),"token_type":"bearer","role":user.role,"name":user.full_name}
 
 @app.post("/api/me/change-password")
@@ -300,6 +310,29 @@ def tenant_profile(tenant:Tenant, db:Session):
             "charges":[{"id":c.id,"due_date":c.due_date,"amount":float(c.amount),"paid":float(c.amount_paid),"note":c.note} for c in charges],
             "payments":[payment_json(p,tenant) for p in payments]}
 
+@app.get("/api/admin/collections")
+def collections(year:int, _:User=Depends(admin),db:Session=Depends(db_session)):
+    if year<2000 or year>2100: raise HTTPException(400,"Choose a year between 2000 and 2100")
+    start,end=date(year,1,1),date(year+1,1,1)
+    tenants=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
+    amounts={t.id:Decimal("0.00") for t in tenants}
+    for p in db.scalars(select(PaymentSubmission).where(PaymentSubmission.state=="approved",PaymentSubmission.payment_date>=start,PaymentSubmission.payment_date<end)):
+        amounts[p.tenant_id]+=p.amount
+    for p in db.scalars(select(ManualPayment).where(ManualPayment.payment_date>=start,ManualPayment.payment_date<end)):
+        amounts[p.tenant_id]+=p.amount
+    approved=db.execute(select(PaymentSubmission.tenant_id,func.sum(PaymentSubmission.amount)).where(PaymentSubmission.state=="approved").group_by(PaymentSubmission.tenant_id)).all()
+    manually_recorded=db.execute(select(ManualPayment.tenant_id,func.sum(ManualPayment.amount)).group_by(ManualPayment.tenant_id)).all()
+    from_submissions=dict(approved)
+    from_manual=dict(manually_recorded)
+    rows=[]
+    for t in tenants:
+        total_paid=db.scalar(select(func.sum(RentCharge.amount_paid)).where(RentCharge.tenant_id==t.id)) or Decimal("0.00")
+        historical=max(Decimal("0.00"),total_paid-(from_submissions.get(t.id) or 0)-(from_manual.get(t.id) or 0))
+        rows.append({"tenant_id":t.id,"name":t.full_name,"room":t.room,"active":t.is_active,
+                     "collected":float(amounts[t.id]),"historical_undated":float(historical)})
+    return {"year":year,"start":start,"end_exclusive":end,"total":float(sum(amounts.values())),
+            "historical_undated":float(sum(Decimal(str(r["historical_undated"])) for r in rows)),"tenants":rows}
+
 @app.get("/api/admin/tenants")
 def list_tenants(_:User=Depends(admin),db:Session=Depends(db_session)):
     tenants=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
@@ -311,6 +344,35 @@ def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_ses
     tenant=db.get(Tenant,tenant_id)
     if not tenant: raise HTTPException(404,"Tenant not found")
     return tenant_profile(tenant,db)
+
+@app.post("/api/admin/tenants/{tenant_id}/archive")
+def archive_tenant(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.scalar(select(Tenant).where(Tenant.id==tenant_id).with_for_update())
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    if not tenant.is_active: raise HTTPException(409,"Tenant already archived")
+    charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant_id).with_for_update()).all()
+    outstanding=sum((max(Decimal("0.00"),c.amount-c.amount_paid) for c in charges),Decimal("0.00"))
+    if outstanding>0: raise HTTPException(409,f"Cannot remove tenant: AUD {outstanding:.2f} rent is still outstanding")
+    if db.scalar(select(PaymentSubmission.id).where(PaymentSubmission.tenant_id==tenant_id,PaymentSubmission.state=="pending")):
+        raise HTTPException(409,"Review the tenant's pending payment submissions before removing them")
+    tenant.is_active=False
+    if tenant.user_id:
+        user=db.get(User,tenant.user_id)
+        if user: user.is_active=False
+    db.commit()
+    return {"ok":True}
+
+@app.post("/api/admin/tenants/{tenant_id}/restore")
+def restore_tenant(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    if tenant.is_active: raise HTTPException(409,"Tenant is already active")
+    tenant.is_active=True
+    if tenant.user_id:
+        user=db.get(User,tenant.user_id)
+        if user: user.is_active=True
+    db.commit()
+    return {"ok":True}
 
 @app.get("/api/me/profile")
 def my_profile(user:User=Depends(current_user),db:Session=Depends(db_session)):
@@ -338,15 +400,16 @@ def resend_invite(tenant_id:int,tasks:BackgroundTasks,_:User=Depends(admin),db:S
 
 @app.post("/api/admin/charges")
 def add_charge(data:ChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
-    tenant=db.get(Tenant,data.tenant_id)
+    tenant=db.scalar(select(Tenant).where(Tenant.id==data.tenant_id).with_for_update())
     if not tenant: raise HTTPException(404,"Tenant not found")
+    if not tenant.is_active: raise HTTPException(409,"Restore the archived tenant before adding rent")
     charge=RentCharge(**data.model_dump()); db.add(charge); db.commit()
     notify(db,tasks,[tenant.email],"Rent charge added",f"A rent charge of AUD {data.amount:.2f} was added for {tenant.full_name}. Sign in to see your balance.")
     return {"id":charge.id}
 
 @app.post("/api/admin/charges/all")
 def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
-    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True).order_by(Tenant.id)).all()
+    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True).order_by(Tenant.id).with_for_update()).all()
     if not tenants: raise HTTPException(400,"Add an active tenant first")
     if db.get(BulkRentRun,data.due_date): raise HTTPException(409,"Rent charges for this date were already created for all tenants")
     db.add(BulkRentRun(due_date=data.due_date))
@@ -363,9 +426,13 @@ def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:
 
 @app.patch("/api/admin/charges/{charge_id}")
 def record_payment(charge_id:int,data:PaymentIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
-    charge=db.get(RentCharge,charge_id)
+    charge=db.scalar(select(RentCharge).where(RentCharge.id==charge_id).with_for_update())
     if not charge: raise HTTPException(404,"Charge not found")
     if Decimal(str(data.amount_paid))>charge.amount: raise HTTPException(400,"Amount paid exceeds charge")
+    delta=Decimal(str(data.amount_paid))-charge.amount_paid
+    if delta:
+        db.add(ManualPayment(tenant_id=charge.tenant_id,charge_id=charge.id,amount=delta,
+                             payment_date=data.payment_date or date.today()))
     charge.amount_paid=data.amount_paid; db.commit()
     tenant=db.get(Tenant,charge.tenant_id)
     notify(db,tasks,[tenant.email],"Rent payment updated",f"A rent payment was updated for {tenant.full_name}. Sign in to see the current balance.")

@@ -1,5 +1,5 @@
 import {useEffect,useState} from "react";
-import {Bell,CalendarDays,CheckCircle2,Home,LogOut,Plus,Users,WalletCards} from "lucide-react";
+import {BarChart3,Bell,CalendarDays,CheckCircle2,Home,LogOut,Plus,Users,WalletCards} from "lucide-react";
 const API=import.meta.env.VITE_API_URL||"http://localhost:8000";
 const auth=()=>({Authorization:`Bearer ${localStorage.getItem("token")}`});
 
@@ -15,6 +15,7 @@ export default function App(){
   <button className={page==="dashboard"?"active":""} onClick={()=>setPage("dashboard")}><WalletCards/>Dashboard</button>
   <button className={page==="activities"?"active":""} onClick={()=>setPage("activities")}><CalendarDays/>Activities & votes</button>
   <button className={page==="payments"?"active":""} onClick={()=>setPage("payments")}><WalletCards/>Payments</button>
+  {user.role==="admin"&&<button className={page==="collections"?"active":""} onClick={()=>setPage("collections")}><BarChart3/>Collections</button>}
   {user.role==="admin"&&<button className={page==="tenants"?"active":""} onClick={()=>setPage("tenants")}><Users/>Tenants</button>}
   {user.role==="admin"&&<button className={page==="add-tenant"?"active":""} onClick={()=>setPage("add-tenant")}><Plus/>Add tenant</button>}
   {user.role==="tenant"&&<button className={page==="my-details"?"active":""} onClick={()=>setPage("my-details")}><Users/>My details</button>}
@@ -22,7 +23,7 @@ export default function App(){
  </nav><button onClick={logout} aria-label="Sign out"><LogOut/>Sign out</button></aside>
  <main><header><div><small>{user.role.toUpperCase()}</small><h1>Welcome, {user.name}</h1></div><Bell/></header>
  {error&&<div className="error">{error}</div>}
- {page==="activities"?<Activities user={user} setError={setError}/>:page==="tenants"&&user.role==="admin"?<Tenants setError={setError}/>:page==="add-tenant"&&user.role==="admin"?<AddTenant setError={setError}/>:page==="my-details"&&user.role==="tenant"?<MyDetails setError={setError}/>:page==="payments"?<Payments user={user} setError={setError} reloadUser={load}/>:page==="recipients"&&user.role==="admin"?<Recipients setError={setError}/>:user.role==="admin"?<AdminDashboard/>:<TenantDashboard user={user}/>}
+ {page==="activities"?<Activities user={user} setError={setError}/>:page==="tenants"&&user.role==="admin"?<Tenants setError={setError}/>:page==="add-tenant"&&user.role==="admin"?<AddTenant setError={setError}/>:page==="my-details"&&user.role==="tenant"?<MyDetails setError={setError}/>:page==="collections"&&user.role==="admin"?<Collections setError={setError}/>:page==="payments"?<Payments user={user} setError={setError} reloadUser={load}/>:page==="recipients"&&user.role==="admin"?<Recipients setError={setError}/>:user.role==="admin"?<AdminDashboard/>:<TenantDashboard user={user}/>}
  </main></div>
 }
 
@@ -32,7 +33,7 @@ function Login({onDone}){
   if(register)r=await fetch(API+"/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.fromEntries(f))});
   else{const body=new URLSearchParams();body.set("username",f.get("email"));body.set("password",f.get("password"));r=await fetch(API+"/api/auth/login",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body})}
   const d=await r.json();if(!r.ok)return setError(d.detail||"Could not sign in");localStorage.setItem("token",d.access_token);onDone()}
- return <div className="login"><div className="login-card"><div className="brand"><Home/> Akshar Purushottam Chhatralay</div><h1>{register?"Create tenant account":"Sign in"}</h1><p>{register?"Use the email and one-time registration code sent by your housing administrator.":"View rent, activities and voting."}</p>{error&&<div className="error">{error}</div>}<form onSubmit={submit}>{register&&<Field name="full_name" label="Full name" autoComplete="name"/>}<Field name="email" label="Email" type="email" autoComplete="email"/><Field name="password" label="Password" type="password" autoComplete={register?"new-password":"current-password"}/>{register&&<Field name="invite_code" label="Registration code from email" autoComplete="off"/>}<button className="primary">{register?"Create account":"Sign in"}</button></form><button className="link" onClick={()=>{setRegister(!register);setError("")}}>{register?"Already registered? Sign in":"Tenant? Create your account"}</button></div></div>
+ return <div className="login"><div className="login-card"><div className="brand"><Home/> Akshar Purushottam Chhatralay</div><h1>{register?"Verify email and create account":"Sign in"}</h1><p>{register?"Enter the email saved by your housing administrator and the code emailed to that address. Your account is created only after the code is verified.":"View rent, activities and voting."}</p>{error&&<div className="error">{error}</div>}<form onSubmit={submit}>{register&&<Field name="full_name" label="Full name" autoComplete="name"/>}<Field name="email" label="Email" type="email" autoComplete="email"/><Field name="password" label="Password" type="password" autoComplete={register?"new-password":"current-password"}/>{register&&<Field name="invite_code" label="Email verification code" autoComplete="one-time-code"/>}<button className="primary">{register?"Verify and create account":"Sign in"}</button></form><button className="link" onClick={()=>{setRegister(!register);setError("")}}>{register?"Already registered? Sign in":"Tenant? Create your account"}</button></div></div>
 }
 const Field=({name,label,type="text",...p})=><label>{label}<input name={name} type={type} required {...p}/></label>;
 
@@ -55,12 +56,29 @@ function ProfileDetails({profile,showPayments=false}){
 }
 
 function Tenants({setError}){
- const [items,setItems]=useState(null),[selected,setSelected]=useState(null),[loading,setLoading]=useState(false),[query,setQuery]=useState("");
- const visible=items?.filter(t=>`${t.name} ${t.room} ${t.email}`.toLowerCase().includes(query.toLowerCase()))||[];
- useEffect(()=>{let active=true;fetch(API+"/api/admin/tenants",{headers:auth()}).then(async r=>{const data=await r.json();if(!r.ok)throw Error(data.detail||"Could not load tenants");if(active)setItems(data)}).catch(e=>setError(e.message));return()=>{active=false}},[setError]);
+ const [items,setItems]=useState(null),[selected,setSelected]=useState(null);
+ const [loading,setLoading]=useState(false),[query,setQuery]=useState(""),[showArchived,setShowArchived]=useState(false);
+ const visible=items?.filter(t=>(showArchived||t.is_active)&&`${t.name} ${t.room} ${t.email}`.toLowerCase().includes(query.toLowerCase()))||[];
+ const load=async()=>{const r=await fetch(API+"/api/admin/tenants",{headers:auth()});const data=await r.json();if(!r.ok)throw Error(data.detail||"Could not load tenants");setItems(data)};
+ useEffect(()=>{void load().catch(e=>setError(e.message))},[setError]);
  async function openTenant(id){setLoading(true);setError("");try{const r=await fetch(API+`/api/admin/tenants/${id}`,{headers:auth()});const data=await r.json();if(!r.ok)throw Error(data.detail||"Could not load tenant details");setSelected(data)}catch(e){setError(e.message)}finally{setLoading(false)}}
- async function resend(t){try{const r=await fetch(API+`/api/admin/tenants/${t.id}/invite`,{method:"POST",headers:auth()});const data=await r.json();if(!r.ok)throw Error(data.detail||"Could not send code");alert(`Registration code queued for ${t.email}. Check delivery in Render logs.`)}catch(e){setError(e.message)}}
- return <>{selected?<section><button className="link" onClick={()=>setSelected(null)}>← All tenants</button><h2>{selected.full_name}</h2><ProfileDetails profile={selected} showPayments/></section>:<section><h2>Tenants</h2><p className="muted">Select a name to view personal information, rent charges and payment submissions.</p><label className="tenant-search">Search tenants<input type="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Name, room or email"/></label>{items===null?<p>Loading tenants…</p>:!items.length?<p>No tenants added yet.</p>:!visible.length?<p>No matching tenants.</p>:<div className="table-scroll"><table><thead><tr><th>Name</th><th>Room</th><th>Email</th><th>Status</th><th>Registration</th></tr></thead><tbody>{visible.map(t=><tr key={t.id}><td><button className="tenant-name" onClick={()=>openTenant(t.id)}>{t.name}</button></td><td>{t.room}</td><td>{t.email}</td><td>{t.is_active?"Active":"Inactive"}</td><td>{t.registered?"Registered":<button className="link" onClick={()=>resend(t)}>Email code</button>}</td></tr>)}</tbody></table></div>}</section>}{loading&&<p>Loading tenant details…</p>}</>
+ async function updateStatus(action){if(!selected)return;const active=action==="archive";if(active&&!confirm(`Remove ${selected.full_name} from active tenants? Their payment records will be kept.`))return;
+  setLoading(true);setError("");try{const r=await fetch(API+`/api/admin/tenants/${selected.id}/${action}`,{method:"POST",headers:auth()});const data=await r.json();if(!r.ok)throw Error(data.detail||"Could not update tenant");setSelected(null);await load()}catch(e){setError(e.message)}finally{setLoading(false)}}
+ async function resend(t){try{const r=await fetch(API+`/api/admin/tenants/${t.id}/invite`,{method:"POST",headers:auth()});const data=await r.json();if(!r.ok)throw Error(data.detail||"Could not send code");alert(`Verification code queued for ${t.email}. Check delivery in Render logs.`)}catch(e){setError(e.message)}}
+ const outstanding=selected?.charges.reduce((total,c)=>total+Math.max(0,c.amount-c.paid),0)||0;
+ const pending=selected?.payments.some(p=>p.state==="pending")||false;
+ if(selected)return <section className="tenant-profile"><button className="link" onClick={()=>setSelected(null)}>← All tenants</button><h2>{selected.full_name}</h2><p className="muted">{selected.is_active?"Active tenant":"Archived tenant"}</p><ProfileDetails profile={selected} showPayments/>
+  <div className="profile-actions">{selected.is_active?<><button className="danger" disabled={loading||outstanding>0||pending} onClick={()=>updateStatus("archive")}>Remove tenant</button>{outstanding>0&&<p>Removal is available after all rent is paid. Outstanding: {aud(outstanding)}.</p>}{pending&&<p>Review pending payment submissions before removal.</p>}</>:<button className="primary" disabled={loading} onClick={()=>updateStatus("restore")}>Restore tenant</button>}</div>
+ </section>;
+ return <section><h2>Tenants</h2><p className="muted">Select a name to see its saved details and payment history.</p><div className="tenant-filters"><label className="tenant-search">Search tenants<input type="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Name, room or email"/></label><label className="checkbox"><input type="checkbox" checked={showArchived} onChange={e=>setShowArchived(e.target.checked)}/> Show archived</label></div>
+ {items===null?<p>Loading tenants…</p>:!items.length?<p>No tenants added yet.</p>:!visible.length?<p>No matching tenants.</p>:<div className="table-scroll"><table><thead><tr><th>Name</th><th>Room</th><th>Email</th><th>Status</th><th>Registration</th></tr></thead><tbody>{visible.map(t=><tr key={t.id}><td><button className="tenant-name" onClick={()=>openTenant(t.id)}>{t.name}</button></td><td>{t.room}</td><td>{t.email}</td><td>{t.is_active?"Active":"Archived"}</td><td>{t.registered?"Registered":t.is_active?<button className="link" onClick={()=>resend(t)}>Send verification code</button>:"Not registered"}</td></tr>)}</tbody></table></div>}{loading&&<p>Loading tenant details…</p>}</section>
+}
+
+function Collections({setError}){
+ const [year,setYear]=useState(new Date().getFullYear()),[data,setData]=useState(null);
+ useEffect(()=>{let active=true;setData(null);fetch(API+`/api/admin/collections?year=${year}`,{headers:auth()}).then(async r=>{const body=await r.json();if(!r.ok)throw Error(body.detail||"Could not load collections");if(active)setData(body)}).catch(e=>setError(e.message));return()=>{active=false}},[year,setError]);
+ const years=Array.from({length:11},(_,i)=>new Date().getFullYear()+1-i);
+ return <><section><h2>Rent collected by tenant</h2><label className="year-picker">Year (1 January to 1 January)<select value={year} onChange={e=>setYear(Number(e.target.value))}>{years.map(y=><option key={y} value={y}>{y} — {y+1}</option>)}</select></label><p className="muted">For {year}, this report includes approved tenant submissions and dated manual payments from 1 January {year} through 31 December {year}. Pending or rejected submissions are excluded.</p>{!data?<p>Loading collections…</p>:<><div className="cards"><Card title="Total collected" value={aud(data.total)} tone="ok"/><Card title="Tenants in report" value={data.tenants.length}/></div><div className="table-scroll"><table><thead><tr><th>Tenant</th><th>Room</th><th>Collected</th></tr></thead><tbody>{data.tenants.map(t=><tr key={t.tenant_id}><td>{t.name}{!t.active&&" (archived)"}</td><td>{t.room}</td><td>{aud(t.collected)}</td></tr>)}</tbody></table></div>{data.historical_undated>0&&<p className="muted">{aud(data.historical_undated)} in older manually recorded payments has no payment date in the original app, so it cannot be assigned to a specific year.</p>}</>}</section></>
 }
 
 function MyDetails({setError}){

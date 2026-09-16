@@ -1,34 +1,100 @@
-:root{font-family:Inter,system-ui,sans-serif;color:#10233c;background:#f3f6fa}*{box-sizing:border-box}body{margin:0}button,input,select{font:inherit}.shell{display:grid;grid-template-columns:250px 1fr;min-height:100vh}aside{background:#102f52;color:white;padding:28px 20px;display:flex;flex-direction:column;gap:35px}.brand{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:800}.brand svg{background:#fff2;padding:8px;width:42px;height:42px;border-radius:14px}nav{display:grid;gap:8px;flex:1}button{border:0;cursor:pointer}aside button{display:flex;gap:10px;align-items:center;background:transparent;color:#bed2e7;padding:12px;border-radius:12px;text-align:left}aside button.active,aside button:hover{background:#ffffff18;color:white}main{padding:32px;max-width:1200px;width:100%;margin:auto}header{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}h1,h2{margin:0 0 10px}header small{color:#17849b;font-weight:800}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}.card,section{background:white;border:1px solid #dfe7ef;border-radius:22px;padding:22px;box-shadow:0 2px 8px #0c234010}.card{display:grid;gap:8px}.card small,.muted{color:#6d7d8e}.card b{font-size:28px}.card.warn b,.due{color:#b45309}.card.ok b{color:#087f5b}section{margin-bottom:20px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:13px;border-bottom:1px solid #e7edf3}.grid-form{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}label{display:grid;gap:7px;font-weight:650}input,select{padding:12px;border:1px solid #ccd8e4;border-radius:11px;background:white}.primary{background:#10375f;color:white;padding:13px 18px;border-radius:11px;font-weight:700;align-self:end}.login{min-height:100vh;display:grid;place-items:center;padding:20px;background:linear-gradient(135deg,#102f52,#16869a)}.login-card{background:white;padding:32px;border-radius:26px;width:min(430px,100%);box-shadow:0 30px 80px #0018}.login-card .brand{color:#12355b}.login form{display:grid;gap:15px}.login p{color:#68798a}.link{background:transparent;color:#146c86;margin-top:18px}.error{background:#fff0f0;color:#a12626;padding:12px;border-radius:10px;margin:10px 0}.center{min-height:100vh;display:grid;place-items:center}.empty{text-align:center;padding:28px;color:#758494}.empty svg{display:block;margin:auto auto 10px}.empty b{color:#1a3048}.activity-list{display:grid;gap:14px}.activity-list article{border:1px solid #dfe7ef;border-radius:16px;padding:18px}.date{color:#16869a;font-size:13px;font-weight:800}.poll{display:grid;gap:8px;margin-top:14px}.poll button{padding:11px;text-align:left;border:1px solid #cad7e4;border-radius:10px;background:#f8fafc}.poll button.chosen{background:#dff5ef;border-color:#4aa98e}.poll button:disabled{cursor:default}@media(max-width:800px){.shell{grid-template-columns:1fr}aside{padding:14px;flex-direction:row;align-items:center;position:sticky;top:0;z-index:4}.brand{font-size:0}.brand svg{width:38px;height:38px}nav{display:flex;overflow:auto}aside>button{margin-left:auto}nav button{font-size:0}nav svg{width:21px}.cards,.grid-form{grid-template-columns:1fr}main{padding:20px}header h1{font-size:24px}}
-
-.tenant-details{display:grid;grid-template-columns:max-content 1fr;gap:10px 22px;max-width:650px;margin:20px 0}.tenant-details dt{font-weight:700;color:#536579}.tenant-details dd{margin:0;overflow-wrap:anywhere}
-
-.tenant-name{background:none;padding:0;color:#146c86;text-decoration:underline;font-weight:700;text-align:left}.tenant-name:hover{color:#10375f}
-
-/* Keep navigation available while the page content grows. */
-.shell>aside{position:sticky;top:0;height:100vh;gap:18px;padding:18px 14px}
-.shell>aside nav{align-content:start;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin}
-.shell>aside nav button{min-height:42px;flex-shrink:0}
-.shell>aside nav svg,.shell>aside>button svg{width:19px;height:19px;flex-shrink:0}
-.shell>aside>.brand{font-size:17px;line-height:1.25}
-.shell>aside>.brand svg{flex-shrink:0}
-.shell main{margin:0 auto}
-.shell main>header{position:sticky;top:0;z-index:3;background:#f3f6fa;padding:14px 0;margin:-14px 0 16px}
-.panel{background:white;border:1px solid #dfe7ef;border-radius:18px;margin-bottom:14px;box-shadow:0 2px 8px #0c234010;padding:0 20px}
-.panel summary{cursor:pointer;padding:18px 2px;font-weight:700;color:#10375f}
-.panel[open] summary{border-bottom:1px solid #e7edf3}
+:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#2d2023;background:#fff8f8;font-synthesis:none}
+*{box-sizing:border-box}
+body{margin:0;min-width:320px}
+button,input,select{font:inherit}
+button{border:0;cursor:pointer}
+button:disabled{cursor:not-allowed;opacity:.55}
+:focus-visible{outline:3px solid #bc3449;outline-offset:2px}
+.shell{display:grid;grid-template-columns:226px minmax(0,1fr);min-height:100vh}
+.shell>aside{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:18px;padding:18px 12px;background:#fff;border-right:1px solid #eddde0}
+.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:800;line-height:1.25;color:#922034}
+.brand svg{flex:none;background:#fee8ec;padding:8px;width:42px;height:42px;border-radius:13px;color:#ad1e36}
+.shell>aside nav{display:grid;align-content:start;gap:3px;flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.shell>aside button{display:flex;align-items:center;gap:9px;width:100%;padding:11px 12px;border-radius:11px;background:transparent;color:#554447;text-align:left;font-weight:600}
+.shell>aside button:hover,.shell>aside button.active{background:#fee9ec;color:#a61f37}
+.shell>aside button.active{box-shadow:inset 3px 0 #b21f3a}
+.shell>aside button svg{flex:none;width:19px;height:19px}
+.shell main{min-width:0;width:100%;max-width:1220px;margin:0 auto;padding:24px 30px 50px}
+.shell main>header{position:sticky;top:0;z-index:3;display:flex;align-items:center;justify-content:space-between;padding:12px 0;margin:-12px 0 18px;background:#fff8f8}
+header small{color:#a61f37;font-weight:800;letter-spacing:.08em}
+h1,h2,h3{line-height:1.3;margin:0 0 12px}
+h1{font-size:clamp(22px,3vw,32px)}
+h2{font-size:20px}
+h3{font-size:16px;margin-top:22px}
+p{line-height:1.5}
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}
+.card,section,.panel{background:#fff;border:1px solid #efdee2;border-radius:16px;box-shadow:0 2px 12px #8c1d2c0b}
+.card{display:grid;align-content:start;gap:9px;padding:18px;min-width:0}
+.card small,.muted{color:#705d61}
+.card b{font-size:clamp(21px,2.5vw,29px);overflow-wrap:anywhere}
+.card.warn b,.due{color:#a62732}
+.card.ok b{color:#8e2336}
+section{padding:20px;margin-bottom:16px;min-width:0;overflow-x:auto}
+.panel{margin-bottom:14px;padding:0 18px}
+.panel summary{cursor:pointer;padding:17px 2px;font-weight:700;color:#9d1e35}
+.panel[open] summary{border-bottom:1px solid #f0e4e7}
 .panel>section{border:0;box-shadow:none;margin:0;padding:18px 0}
-.table-scroll{max-height:310px;overflow:auto}
-.table-scroll th{position:sticky;top:0;background:white}
-.tenant-search{max-width:360px;margin:14px 0}
+.table-scroll{max-width:100%;max-height:310px;overflow:auto}
 section>.table-scroll{max-height:55vh}
-@media(max-width:800px){
- .shell>aside{height:auto;max-height:none;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;gap:8px;padding:10px 12px;z-index:5}
- .shell>aside>.brand{grid-column:1;grid-row:1;font-size:14px;min-width:0}
- .shell>aside>.brand svg{width:32px;height:32px}
- .shell>aside>button{grid-column:2;grid-row:1;margin:0;font-size:0;padding:7px}
- .shell>aside nav{grid-column:1/-1;grid-row:2;display:flex;flex:initial;min-height:0;min-width:0;overflow-x:auto;overflow-y:hidden;gap:5px;padding-bottom:3px;white-space:nowrap}
- .shell>aside nav button{font-size:12px;padding:8px 10px;white-space:nowrap;min-height:40px}
- .shell>aside nav svg{width:17px;height:17px}
- .shell main>header{position:static;margin:0 0 18px;padding:0}
- .cards{grid-template-columns:repeat(auto-fit,minmax(145px,1fr))}
+table{width:100%;border-collapse:collapse;min-width:460px}
+th,td{text-align:left;padding:12px 10px;border-bottom:1px solid #f0e5e7;vertical-align:top}
+th{font-size:13px;color:#5d4349}
+.table-scroll th{position:sticky;top:0;background:#fff;z-index:1}
+.grid-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+label{display:grid;gap:6px;font-weight:650;min-width:0}
+input,select{min-width:0;width:100%;padding:11px 12px;border:1px solid #d8c6ca;border-radius:10px;background:#fff;color:#2d2023}
+input:focus,select:focus{border-color:#b3223c}
+.primary,.danger{padding:12px 17px;border-radius:10px;font-weight:700;align-self:end}
+.primary{background:#a81d36;color:#fff}
+.primary:hover{background:#86162b}
+.danger{background:#fff;color:#a21c33;border:1px solid #bd3b50}
+.danger:hover:not(:disabled){background:#fff0f2}
+.link,.tenant-name{background:transparent;color:#981c33;padding:2px 0;text-decoration:underline;text-underline-offset:3px;text-align:left}
+.link:hover,.tenant-name:hover{color:#6f1022}
+.tenant-name{font-weight:700}
+.login{min-height:100vh;display:grid;place-items:center;padding:18px;background:linear-gradient(135deg,#a51f37 0%,#fff4f5 82%)}
+.login-card{background:#fff;padding:30px;border-radius:22px;width:min(440px,100%);box-shadow:0 24px 70px #60172230}
+.login-card .brand{margin-bottom:25px}
+.login form{display:grid;gap:14px}
+.login p{color:#6c565b}
+.error{background:#fff0f1;color:#9e152c;border:1px solid #f3c9d0;padding:12px;border-radius:10px;margin:10px 0}
+.center{min-height:100vh;display:grid;place-items:center}
+.empty{text-align:center;padding:25px;color:#775e63}
+.empty svg{display:block;margin:0 auto 10px}
+.empty b{color:#5a2730}
+.activity-list{display:grid;gap:12px}
+.activity-list article{border:1px solid #f0e0e4;border-radius:12px;padding:15px}
+.date{color:#a21c33;font-size:13px;font-weight:800}
+.poll{display:grid;gap:8px;margin-top:14px}
+.poll button{padding:11px;text-align:left;border:1px solid #d8c6ca;border-radius:10px;background:#fffafa}
+.poll button.chosen{background:#fce8ec;border-color:#b3223c}
+.tenant-details{display:grid;grid-template-columns:minmax(120px,max-content) minmax(0,1fr);gap:10px 20px;max-width:680px;margin:20px 0}
+.tenant-details dt{font-weight:700;color:#5e484d}
+.tenant-details dd{margin:0;overflow-wrap:anywhere}
+.tenant-filters{display:flex;align-items:end;flex-wrap:wrap;gap:15px;margin:14px 0}
+.tenant-search{width:min(360px,100%)}
+.checkbox{display:flex;align-items:center;gap:8px;padding:11px 0;white-space:nowrap}
+.checkbox input{width:auto;accent-color:#a81d36}
+.year-picker{width:min(260px,100%);margin:10px 0}
+.profile-actions{border-top:1px solid #efdee2;margin-top:24px;padding-top:20px}
+.profile-actions p{color:#9d2439}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+.actions button{padding:9px 13px;border-radius:8px;background:#fbe8eb;color:#971b31;font-weight:700}
+@media(max-width:900px){.shell{grid-template-columns:190px minmax(0,1fr)}.shell main{padding:18px}.cards{gap:10px}.card{padding:14px}}
+@media(max-width:720px){
+ .shell{display:block}
+ .shell>aside{height:auto;max-height:none;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;gap:8px;padding:9px 12px;z-index:5;box-shadow:0 2px 10px #5a162319}
+ .shell>aside .brand{grid-column:1;grid-row:1;font-size:13px;min-width:0}
+ .shell>aside .brand svg{width:32px;height:32px;padding:6px}
+ .shell>aside>button{grid-column:2;grid-row:1;margin:0;width:auto;font-size:0;padding:8px}
+ .shell>aside nav{grid-column:1/-1;grid-row:2;display:flex;min-width:0;overflow-x:auto;overflow-y:hidden;gap:4px;padding-bottom:3px;white-space:nowrap;flex:auto}
+ .shell>aside nav button{width:auto;flex:none;font-size:12px;padding:8px 10px;white-space:nowrap}
+ .shell>aside nav button svg{width:16px;height:16px}
+ .shell main{padding:16px 12px 32px}
+ .shell main>header{position:static;margin:0 0 15px;padding:0}
+ .cards{grid-template-columns:repeat(auto-fit,minmax(135px,1fr))}
+ .grid-form{grid-template-columns:1fr}
+ section{padding:15px}
+ .tenant-details{grid-template-columns:1fr;gap:2px;margin:14px 0}
+ .tenant-details dd{margin-bottom:10px}
 }

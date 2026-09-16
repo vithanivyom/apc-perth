@@ -17,6 +17,9 @@ A complete starter with a React frontend, FastAPI backend and PostgreSQL databas
 - Admin approval or rejection; balance updates only on approval; duplicate bank references rejected per tenant
 - Email notices for new tenant accounts, rent charges, payment submissions and decisions, poll votes, and activities
 - Admin-managed additional email recipients and one-time email registration codes
+- White and red mobile layout with compact navigation and phone-friendly forms
+- Archive a tenant only when their rent is paid in full and there are no pending payment submissions; archived accounts cannot sign in, can be restored, and retain their payment history
+- Admin collections by tenant for each January 1 through December 31 period, including approved submissions and dated manual payment adjustments
 - Activities and polls
 - One vote per tenant per poll
 - Poll totals visible to the admin; tenants see only their own choice
@@ -79,6 +82,16 @@ Existing unregistered tenants need a registration code: sign in as admin and cli
 ### Bulk rent workflow
 
 Open **Tenants** in the admin menu and click a name to see the tenant's address, reference contacts, bond, charge history, and payment submissions. Tenants see their own saved information under **My details**. The admin dashboard's **Charge all active tenants** action creates one charge per currently active tenant using each person's saved weekly rent, and queues email notices after saving. The same due date cannot be submitted through this bulk form twice. This action does not charge a bank account or send future recurring reminders automatically; repeat it for the next rent period. Individual charges remain available for adjustments. Ensure `EMAIL_FROM` uses your verified Resend domain before relying on email notifications; the backend will log failed deliveries.
+
+### Tenant removal and annual collections
+
+**Tenants → tenant name → Remove tenant** is enabled only after every charge is paid and all submitted payments have been reviewed. The backend repeats these checks. Removal archives the tenant instead of deleting records, disables their login, and excludes them from future bulk charges. Use **Show archived → Restore tenant** to reactivate them. Archived tenants remain in financial reports.
+
+**Collections** shows money received from 1 January of the selected year up to, but excluding, 1 January of the next year. It uses the payment date entered by the tenant for approved submissions, plus the payment date on any manual admin payment adjustment made after this update. Earlier manual payments have no recorded payment date; the report shows them separately as **historical undated** instead of assigning them to a guessed year. Pending or rejected submissions are not counted. If manually recording a payment through the API, provide `payment_date` in the `PATCH /api/admin/charges/{charge_id}` JSON along with `amount_paid`; if omitted, today's server date is used.
+
+New tenant registration requires a one-time code emailed to the exact tenant email already entered by the admin. Incorrect or expired codes do not create an account and do not change the Registered status. Previously registered accounts continue to work; the app does not have independent verification records for accounts created before this requirement.
+
+On deployment the backend creates the new `manual_payments` table without changing the existing `tenants` or `rent_charges` tables. Back up the Neon database before deploying. No new Render environment variables are needed.
 
 The existing `docker-compose.yml` in the uploaded ZIP included a real admin password and JWT key. This revision removes them; rotate any values that were committed to GitHub or shared. **Changing `ADMIN_PASSWORD` in Render does not change the password of an existing admin account**: sign in and use **Email recipients → Change admin password** after deploying. Also rotate `SECRET_KEY` in Render, which signs users out. Removing a password from the current file does not remove it from Git history.
 
