@@ -3,3 +3,32 @@
 .tenant-details{display:grid;grid-template-columns:max-content 1fr;gap:10px 22px;max-width:650px;margin:20px 0}.tenant-details dt{font-weight:700;color:#536579}.tenant-details dd{margin:0;overflow-wrap:anywhere}
 
 .tenant-name{background:none;padding:0;color:#146c86;text-decoration:underline;font-weight:700;text-align:left}.tenant-name:hover{color:#10375f}
+
+/* Keep navigation available while the page content grows. */
+.shell>aside{position:sticky;top:0;height:100vh;gap:18px;padding:18px 14px}
+.shell>aside nav{align-content:start;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin}
+.shell>aside nav button{min-height:42px;flex-shrink:0}
+.shell>aside nav svg,.shell>aside>button svg{width:19px;height:19px;flex-shrink:0}
+.shell>aside>.brand{font-size:17px;line-height:1.25}
+.shell>aside>.brand svg{flex-shrink:0}
+.shell main{margin:0 auto}
+.shell main>header{position:sticky;top:0;z-index:3;background:#f3f6fa;padding:14px 0;margin:-14px 0 16px}
+.panel{background:white;border:1px solid #dfe7ef;border-radius:18px;margin-bottom:14px;box-shadow:0 2px 8px #0c234010;padding:0 20px}
+.panel summary{cursor:pointer;padding:18px 2px;font-weight:700;color:#10375f}
+.panel[open] summary{border-bottom:1px solid #e7edf3}
+.panel>section{border:0;box-shadow:none;margin:0;padding:18px 0}
+.table-scroll{max-height:310px;overflow:auto}
+.table-scroll th{position:sticky;top:0;background:white}
+.tenant-search{max-width:360px;margin:14px 0}
+section>.table-scroll{max-height:55vh}
+@media(max-width:800px){
+ .shell>aside{height:auto;max-height:none;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;gap:8px;padding:10px 12px;z-index:5}
+ .shell>aside>.brand{grid-column:1;grid-row:1;font-size:14px;min-width:0}
+ .shell>aside>.brand svg{width:32px;height:32px}
+ .shell>aside>button{grid-column:2;grid-row:1;margin:0;font-size:0;padding:7px}
+ .shell>aside nav{grid-column:1/-1;grid-row:2;display:flex;flex:initial;min-height:0;min-width:0;overflow-x:auto;overflow-y:hidden;gap:5px;padding-bottom:3px;white-space:nowrap}
+ .shell>aside nav button{font-size:12px;padding:8px 10px;white-space:nowrap;min-height:40px}
+ .shell>aside nav svg{width:17px;height:17px}
+ .shell main>header{position:static;margin:0 0 18px;padding:0}
+ .cards{grid-template-columns:repeat(auto-fit,minmax(145px,1fr))}
+}
