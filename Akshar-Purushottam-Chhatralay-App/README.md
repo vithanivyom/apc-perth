@@ -10,6 +10,8 @@ A complete starter with a React frontend, FastAPI backend and PostgreSQL databas
 - Admin view of every pending balance
 - Admin view of all tenants and their outstanding balances
 - Admin-only personal details, references, charge history, and payment history for each tenant
+- Dedicated admin **Tenants** page listing all tenant names, including inactive records; selecting a name opens that tenant's details
+- Tenant **My details** page showing only the signed-in tenant's saved profile, references, rent charges, and payment submissions
 - Create rent charges for every active tenant on one due date using each tenant's saved weekly rent; email notices are queued for each tenant
 - Tenant payment submissions with optional private receipt image (JPG, PNG, WebP, max 2 MB)
 - Admin approval or rejection; balance updates only on approval; duplicate bank references rejected per tenant
@@ -76,7 +78,7 @@ Existing unregistered tenants need a registration code: sign in as admin and cli
 
 ### Bulk rent workflow
 
-On the admin dashboard, click **View details** beside a tenant to see their address, reference contacts, bond, charge history and payment submissions. Use **Charge all active tenants** to choose one due date. The system makes one charge per currently active tenant using that tenant's saved weekly rent, and queues email notices after saving. The same due date cannot be submitted through this bulk form twice. This action does not charge a bank account or send future recurring reminders automatically; repeat it for the next rent period. Individual charges remain available for adjustments. Ensure `EMAIL_FROM` uses your verified Resend domain before relying on email notifications; the backend will log failed deliveries.
+Open **Tenants** in the admin menu and click a name to see the tenant's address, reference contacts, bond, charge history, and payment submissions. Tenants see their own saved information under **My details**. The admin dashboard's **Charge all active tenants** action creates one charge per currently active tenant using each person's saved weekly rent, and queues email notices after saving. The same due date cannot be submitted through this bulk form twice. This action does not charge a bank account or send future recurring reminders automatically; repeat it for the next rent period. Individual charges remain available for adjustments. Ensure `EMAIL_FROM` uses your verified Resend domain before relying on email notifications; the backend will log failed deliveries.
 
 The existing `docker-compose.yml` in the uploaded ZIP included a real admin password and JWT key. This revision removes them; rotate any values that were committed to GitHub or shared. **Changing `ADMIN_PASSWORD` in Render does not change the password of an existing admin account**: sign in and use **Email recipients → Change admin password** after deploying. Also rotate `SECRET_KEY` in Render, which signs users out. Removing a password from the current file does not remove it from Git history.
 

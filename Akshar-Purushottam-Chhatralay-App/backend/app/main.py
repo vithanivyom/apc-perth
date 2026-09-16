@@ -289,12 +289,9 @@ def dashboard(_:User=Depends(admin),db:Session=Depends(db_session)):
         rows.append({"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,"registered":bool(t.user_id),"weekly_rent":float(t.weekly_rent),"balance":balance})
     return {"tenants":rows,"pending":[r for r in rows if r["balance"]>0],"total_outstanding":sum(r["balance"] for r in rows)}
 
-@app.get("/api/admin/tenants/{tenant_id}")
-def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
-    tenant=db.get(Tenant,tenant_id)
-    if not tenant: raise HTTPException(404,"Tenant not found")
-    charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant_id).order_by(RentCharge.due_date.desc(),RentCharge.id.desc())).all()
-    payments=db.scalars(select(PaymentSubmission).where(PaymentSubmission.tenant_id==tenant_id).order_by(PaymentSubmission.id.desc())).all()
+def tenant_profile(tenant:Tenant, db:Session):
+    charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant.id).order_by(RentCharge.due_date.desc(),RentCharge.id.desc())).all()
+    payments=db.scalars(select(PaymentSubmission).where(PaymentSubmission.tenant_id==tenant.id).order_by(PaymentSubmission.id.desc())).all()
     return {"id":tenant.id,"full_name":tenant.full_name,"email":tenant.email,"phone":tenant.phone,
             "current_address":tenant.current_address,"room":tenant.room,"move_in_date":tenant.move_in_date,
             "weekly_rent":float(tenant.weekly_rent),"bond_amount":float(tenant.bond_amount),
@@ -302,6 +299,25 @@ def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_ses
             "reference_email":tenant.reference_email,"is_active":tenant.is_active,"registered":bool(tenant.user_id),
             "charges":[{"id":c.id,"due_date":c.due_date,"amount":float(c.amount),"paid":float(c.amount_paid),"note":c.note} for c in charges],
             "payments":[payment_json(p,tenant) for p in payments]}
+
+@app.get("/api/admin/tenants")
+def list_tenants(_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenants=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
+    return [{"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,
+             "is_active":t.is_active,"registered":bool(t.user_id)} for t in tenants]
+
+@app.get("/api/admin/tenants/{tenant_id}")
+def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    return tenant_profile(tenant,db)
+
+@app.get("/api/me/profile")
+def my_profile(user:User=Depends(current_user),db:Session=Depends(db_session)):
+    if user.role!="tenant": raise HTTPException(403,"Tenant access required")
+    tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id))
+    if not tenant: raise HTTPException(404,"Your tenant profile is not linked")
+    return tenant_profile(tenant,db)
 
 @app.post("/api/admin/tenants")
 def add_tenant(data:TenantIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):

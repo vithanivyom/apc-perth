@@ -62,6 +62,11 @@ class PaymentFlow(unittest.TestCase):
             registered = client.post("/api/auth/register", json={"full_name": "Example Tenant", "email": "tenant@example.com", "password": "some-password", "invite_code": code})
             self.assertEqual(registered.status_code, 200, registered.text)
             tenant = {"Authorization": "Bearer " + registered.json()["access_token"]}
+            self.assertEqual(client.get("/api/admin/tenants", headers=tenant).status_code, 403)
+            self.assertEqual(client.get(f"/api/admin/tenants/{tenant_id}", headers=tenant).status_code, 403)
+            self.assertEqual(client.get("/api/me/profile", headers=admin).status_code, 403)
+            self.assertEqual(client.get("/api/me/profile", headers=tenant).json()["id"], tenant_id)
+            self.assertIn("Example Tenant", [t["name"] for t in client.get("/api/admin/tenants", headers=admin).json()])
             self.assertEqual(client.post("/api/admin/charges", headers=admin, json={"tenant_id": tenant_id, "due_date": "2026-02-01", "amount": 100}).status_code, 200)
             claim = client.post("/api/payments", headers=tenant,
                 data={"amount": "60.00", "payment_date": "2026-02-01", "bank_reference": "ABC123"},
