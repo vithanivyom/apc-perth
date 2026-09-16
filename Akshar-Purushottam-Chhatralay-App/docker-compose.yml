@@ -18,10 +18,12 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://haven:haven_local_password@db:5432/haven
-      SECRET_KEY: 1csdlcnd-4rsdcckjrnkv3435935scd
-      ADMIN_EMAIL: vithanivyom2@gmail.com
-      ADMIN_PASSWORD: Akshar@purushottam$1109
-      FRONTEND_URLS: http://192.168.0.236
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in your local .env file}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL in your local .env file}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in your local .env file}
+      FRONTEND_URLS: http://localhost:5173
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
     ports: ["8000:8000"]
     depends_on:
       db:
@@ -30,7 +32,7 @@ services:
     build: ./frontend
     restart: unless-stopped
     environment:
-      VITE_API_URL: http://192.168.0.236
+      VITE_API_URL: http://localhost:8000
     ports: ["5173:5173"]
     depends_on: [backend]
 volumes:

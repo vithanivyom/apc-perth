@@ -8,6 +8,11 @@ A complete starter with a React frontend, FastAPI backend and PostgreSQL databas
 - Admin-only tenant, references, address and rent management
 - Tenant-only personal balance and rent history
 - Admin view of every pending balance
+- Admin view of all tenants and their outstanding balances
+- Tenant payment submissions with optional private receipt image (JPG, PNG, WebP, max 2 MB)
+- Admin approval or rejection; balance updates only on approval; duplicate bank references rejected per tenant
+- Email notices for new tenant accounts, rent charges, payment submissions and decisions, poll votes, and activities
+- Admin-managed additional email recipients and one-time email registration codes
 - Activities and polls
 - One vote per tenant per poll
 - Poll totals visible to the admin; tenants see only their own choice
@@ -17,7 +22,7 @@ A complete starter with a React frontend, FastAPI backend and PostgreSQL databas
 
 1. Install Docker Desktop.
 2. Open docker-compose.yml.
-3. Change ADMIN_EMAIL, ADMIN_PASSWORD, and SECRET_KEY.
+3. Copy `.env.example` to `.env` and configure all values, especially `SECRET_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `RESEND_API_KEY`, and `EMAIL_FROM`.
 4. Open a terminal in this folder.
 5. Run: docker compose up --build
 6. Open http://localhost:5173
@@ -31,7 +36,7 @@ API documentation: http://localhost:8000/docs
 2. Admin opens Add tenant and saves the tenant using their real email.
 3. Admin adds a rent charge from the dashboard.
 4. Tenant opens the website and selects Create your account.
-5. The tenant must register with the exact email saved by the admin.
+5. The tenant must register with the exact email and one-time code sent by the app (valid for seven days). The admin can resend it from the dashboard.
 6. Tenant can see only their own balance, activities and polls.
 
 ## Important production changes
@@ -42,7 +47,11 @@ API documentation: http://localhost:8000/docs
 - Add automated database backups.
 - Use database migrations (Alembic) before changing a live schema.
 - Use secure, HTTP-only cookies instead of browser storage for a high-security deployment.
-- Add email verification and password-reset email before serving real tenants.
+- Add a password-reset email flow before inviting tenants who might forget their passwords.
+- Tenant registration now requires a one-time code sent to the address on the tenant record. Configure the Resend Email API before creating more tenant accounts.
+- Receipt bytes are stored in Neon PostgreSQL to avoid losing files when Render restarts. Each image is capped at 2 MB. Monitor your Neon storage usage and move files to private object storage as usage grows.
+- Email sends happen after the database change. Failed email delivery is logged but is not retried automatically; use a durable mail queue or provider webhooks for delivery guarantees.
+- Never send bank passwords or full account credentials in the payment details field. A submitted receipt is a claim, not bank verification.
 - Review the privacy policy and Australian privacy obligations before collecting personal data.
 
 ## Suggested deployment
@@ -52,6 +61,18 @@ API documentation: http://localhost:8000/docs
 - PostgreSQL: Neon, Supabase, Render PostgreSQL, Railway or Azure Database for PostgreSQL
 
 When deploying, set VITE_API_URL to the backend URL, FRONTEND_URLS to the frontend URL, and DATABASE_URL to the managed PostgreSQL connection string.
+
+## Updating the existing Neon + Render deployment
+
+1. Back up the production database using Neon's backup/export tools. Do not replace or reset the database.
+2. Set up a Resend account, verify a domain you own, and create a sending API key. [Resend's email API](https://resend.com/docs/api-reference/emails/send-email) sends over HTTPS. Add `RESEND_API_KEY` and `EMAIL_FROM` (for example, `Chhatralay <updates@your-verified-domain.example>`) to the **backend Web Service** in Render. Render's Free web services [block outbound SMTP ports](https://render.com/docs/free), so standard SMTP will not work here. The testing sender may only email your own address until a domain is verified. Keep your existing `DATABASE_URL`, `SECRET_KEY`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `FRONTEND_URLS` unchanged unless intentionally rotating them. Do not add the API key to the frontend or GitHub.
+3. Replace the tracked project files in your Git checkout with the corresponding files from this ZIP, inspect `git diff`, commit, and push `main`. Deploy backend first. On startup, SQLAlchemy creates only the new `payment_submissions`, `notification_recipients`, and `registration_invites` tables; existing tables and tenants are retained. For later schema changes use a real database migration.
+4. Wait for backend `https://apc-perth.onrender.com/api/health` to respond with `{"status":"ok"}`, then wait for the frontend Static Site to build and become Live. Keep `VITE_API_URL=https://apc-perth.onrender.com` on that frontend.
+5. Test one tenant with a small rent charge: submit a payment and image, confirm status Pending and no balance change, approve it, and check the balance changes once. Submit another and reject it; confirm the balance stays unchanged. Confirm mail reaches tenant, admin, and any additional recipient. Test an activity announcement. The backend receipt endpoint requires admin authentication.
+
+Existing unregistered tenants need a registration code: sign in as admin and click **Email code** beside their name. Existing registered tenants can keep logging in. Do not publish this update before the email API and sender domain are configured if tenants still need to register.
+
+The existing `docker-compose.yml` in the uploaded ZIP included a real admin password and JWT key. This revision removes them; rotate any values that were committed to GitHub or shared. **Changing `ADMIN_PASSWORD` in Render does not change the password of an existing admin account**: sign in and use **Email recipients → Change admin password** after deploying. Also rotate `SECRET_KEY` in Render, which signs users out. Removing a password from the current file does not remove it from Git history.
 
 ## Folder guide
 

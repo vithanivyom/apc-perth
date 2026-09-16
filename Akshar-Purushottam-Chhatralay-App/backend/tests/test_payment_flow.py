@@ -1,0 +1,61 @@
+"""Run with: pip install httpx; python -m unittest discover -s tests"""
+import os
+import re
+import tempfile
+import unittest
+from pathlib import Path
+
+DB_DIR = tempfile.TemporaryDirectory()
+os.environ["DATABASE_URL"] = "sqlite:///" + str(Path(DB_DIR.name) / "app.db")
+os.environ["SECRET_KEY"] = "test-only-key"
+os.environ["ADMIN_EMAIL"] = "admin@example.com"
+os.environ["ADMIN_PASSWORD"] = "test-admin-password"
+os.environ["RESEND_API_KEY"] = "test-only-key"
+os.environ["EMAIL_FROM"] = "no-reply@example.com"
+
+from fastapi.testclient import TestClient
+from app import main
+
+
+class PaymentFlow(unittest.TestCase):
+    def test_review_and_receipt_permissions(self):
+        sent = []
+        main.send_email = lambda recipients, subject, body: sent.append((recipients, subject, body))
+        with TestClient(main.app) as client:
+            response = client.post("/api/auth/login", data={"username": "admin@example.com", "password": "test-admin-password"})
+            self.assertEqual(response.status_code, 200, response.text)
+            admin = {"Authorization": "Bearer " + response.json()["access_token"]}
+            created = client.post("/api/admin/tenants", headers=admin, json={
+                "full_name": "Example Tenant", "email": "tenant@example.com", "room": "A1",
+                "move_in_date": "2026-01-01", "weekly_rent": 200})
+            self.assertEqual(created.status_code, 200, created.text)
+            tenant_id = created.json()["id"]
+            invite = next(body for _, subject, body in sent if subject == "Your chhatralay registration code")
+            code = re.search(r"code is: (\S+)", invite).group(1)
+            self.assertEqual(client.post("/api/auth/register", json={"full_name": "Other", "email": "tenant@example.com", "password": "some-password", "invite_code": "wrong"}).status_code, 403)
+            registered = client.post("/api/auth/register", json={"full_name": "Example Tenant", "email": "tenant@example.com", "password": "some-password", "invite_code": code})
+            self.assertEqual(registered.status_code, 200, registered.text)
+            tenant = {"Authorization": "Bearer " + registered.json()["access_token"]}
+            self.assertEqual(client.post("/api/admin/charges", headers=admin, json={"tenant_id": tenant_id, "due_date": "2026-02-01", "amount": 100}).status_code, 200)
+            claim = client.post("/api/payments", headers=tenant,
+                data={"amount": "60.00", "payment_date": "2026-02-01", "bank_reference": "ABC123"},
+                files={"receipt": ("proof.png", b"\x89PNG\r\n\x1a\n" + b"small-test-image", "image/png")})
+            self.assertEqual(claim.status_code, 200, claim.text)
+            payment_id = claim.json()["id"]
+            self.assertEqual(claim.json()["state"], "pending")
+            self.assertEqual(client.get("/api/me", headers=tenant).json()["tenant"]["balance"], 100)
+            self.assertEqual(client.get(f"/api/admin/payments/{payment_id}/receipt", headers=tenant).status_code, 403)
+            self.assertEqual(client.get(f"/api/admin/payments/{payment_id}/receipt", headers=admin).status_code, 200)
+            self.assertEqual(client.post(f"/api/admin/payments/{payment_id}/review", headers=admin, json={"decision": "approved"}).status_code, 200)
+            self.assertEqual(client.get("/api/me", headers=tenant).json()["tenant"]["balance"], 40)
+            self.assertEqual(client.post(f"/api/admin/payments/{payment_id}/review", headers=admin, json={"decision": "approved"}).status_code, 409)
+            rejected = client.post("/api/payments", headers=tenant, data={"amount": "20.00", "payment_date": "2026-02-02", "bank_reference": "DEF456"})
+            self.assertEqual(rejected.status_code, 200, rejected.text)
+            self.assertEqual(client.post(f"/api/admin/payments/{rejected.json()['id']}/review", headers=admin, json={"decision": "rejected", "note": "Not in bank"}).status_code, 200)
+            self.assertEqual(client.get("/api/me", headers=tenant).json()["tenant"]["balance"], 40)
+            self.assertTrue(any("Payment approved" == subject for _, subject, _ in sent))
+            self.assertTrue(any("Payment rejected" == subject for _, subject, _ in sent))
+
+
+if __name__ == "__main__":
+    unittest.main()
