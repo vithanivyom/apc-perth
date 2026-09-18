@@ -20,7 +20,7 @@ from app import main
 class PaymentFlow(unittest.TestCase):
     def test_calendar_year_archiving_and_email_verification(self):
         sent = []
-        main.send_email = lambda recipients, subject, body: sent.append((recipients, subject, body))
+        main.send_email = lambda recipients, subject, body, attachment=None: sent.append((recipients, subject, body))
         with TestClient(main.app) as client:
             login = client.post("/api/auth/login", data={"username":"admin@example.com","password":"test-admin-password"})
             admin = {"Authorization":"Bearer "+login.json()["access_token"]}
@@ -33,7 +33,7 @@ class PaymentFlow(unittest.TestCase):
             self.assertEqual(invalid.status_code,403)
             row = next(t for t in client.get("/api/admin/tenants",headers=admin).json() if t["id"]==tenant_id)
             self.assertFalse(row["registered"])
-            code = re.search(r"code is: (\S+)", next(body for _,subject,body in sent if subject=="Your chhatralay registration code")).group(1)
+            code = re.search(r"\b\d{6}\b", next(body for _,subject,body in sent if subject=="Your registration code")).group()
             registered = client.post("/api/auth/register",json={"full_name":"Calendar Tenant","email":"calendar@example.com",
                 "password":"tenant-password","invite_code":code})
             self.assertEqual(registered.status_code,200,registered.text)
@@ -61,7 +61,7 @@ class PaymentFlow(unittest.TestCase):
 
     def test_bulk_charges_and_tenant_details(self):
         sent = []
-        main.send_email = lambda recipients, subject, body: sent.append((recipients, subject, body))
+        main.send_email = lambda recipients, subject, body, attachment=None: sent.append((recipients, subject, body))
         with TestClient(main.app) as client:
             login = client.post("/api/auth/login", data={"username": "admin@example.com", "password": "test-admin-password"})
             self.assertEqual(login.status_code, 200, login.text)
@@ -83,11 +83,11 @@ class PaymentFlow(unittest.TestCase):
             self.assertEqual(charge.json()["created"], 2)
             self.assertEqual(client.post("/api/admin/charges/all", headers=admin, json={"due_date": "2026-12-01"}).status_code, 409)
             self.assertEqual([client.get(f"/api/admin/tenants/{i}", headers=admin).json()["charges"][0]["amount"] for i in ids], [125, 175])
-            self.assertTrue(any(subject == "Rent due on 2026-12-01" for _, subject, _ in sent))
+            self.assertTrue(any(subject == "Rent due" for _, subject, _ in sent))
 
     def test_review_and_receipt_permissions(self):
         sent = []
-        main.send_email = lambda recipients, subject, body: sent.append((recipients, subject, body))
+        main.send_email = lambda recipients, subject, body, attachment=None: sent.append((recipients, subject, body))
         with TestClient(main.app) as client:
             response = client.post("/api/auth/login", data={"username": "admin@example.com", "password": "test-admin-password"})
             self.assertEqual(response.status_code, 200, response.text)
@@ -97,8 +97,8 @@ class PaymentFlow(unittest.TestCase):
                 "move_in_date": "2026-01-01", "weekly_rent": 200})
             self.assertEqual(created.status_code, 200, created.text)
             tenant_id = created.json()["id"]
-            invite = next(body for _, subject, body in sent if subject == "Your chhatralay registration code")
-            code = re.search(r"code is: (\S+)", invite).group(1)
+            invite = next(body for _, subject, body in sent if subject == "Your registration code")
+            code = re.search(r"\b\d{6}\b", invite).group()
             self.assertEqual(client.post("/api/auth/register", json={"full_name": "Other", "email": "tenant@example.com", "password": "some-password", "invite_code": "wrong"}).status_code, 403)
             registered = client.post("/api/auth/register", json={"full_name": "Example Tenant", "email": "tenant@example.com", "password": "some-password", "invite_code": code})
             self.assertEqual(registered.status_code, 200, registered.text)

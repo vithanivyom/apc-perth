@@ -4,18 +4,22 @@ import json
 import urllib.request
 import hashlib
 import secrets
+import base64
+import csv
+import io
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, UploadFile, File, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, UploadFile, File, Header, status
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, create_engine, func, select
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, create_engine, func, select, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -24,6 +28,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-before-production")
 ALGORITHM = "HS256"
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@example.com").lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
+FRONTEND_URL = os.getenv("PUBLIC_FRONTEND_URL", "").strip().rstrip("/") or os.getenv("FRONTEND_URLS", "http://localhost:5173").split(",")[0].strip().rstrip("/")
+PERTH = ZoneInfo("Australia/Perth")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -55,6 +61,12 @@ class Tenant(Base):
     reference_name: Mapped[str] = mapped_column(String(150), default="")
     reference_phone: Mapped[str] = mapped_column(String(40), default="")
     reference_email: Mapped[str] = mapped_column(String(255), default="")
+    date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    parent_phone: Mapped[str] = mapped_column(String(40), default="")
+    university_name: Mapped[str] = mapped_column(String(150), default="")
+    course_name: Mapped[str] = mapped_column(String(150), default="")
+    graduation_month: Mapped[str] = mapped_column(String(7), default="")
+    referee_location: Mapped[str] = mapped_column(String(150), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 class RentCharge(Base):
@@ -141,41 +153,90 @@ class RegistrationInvite(Base):
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class ReminderDelivery(Base):
+    __tablename__ = "reminder_deliveries"
+    __table_args__ = (UniqueConstraint("kind", "item_id", "tenant_id", name="uq_reminder_item_tenant"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    item_id: Mapped[int] = mapped_column(Integer)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+def calendar_file(kind:str, item_id:int, tenant_id:int, title:str, when:date, details:str="") -> dict:
+    def safe(value):
+        return str(value).replace("\\", "\\\\").replace("\r", "").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
+    lines=["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//APC//Chhatralay Calendar//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "BEGIN:VEVENT",
+        f"UID:{kind}-{item_id}-{tenant_id}@apcperth.site",f"DTSTAMP:{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}",
+        f"DTSTART;VALUE=DATE:{when:%Y%m%d}",f"DTEND;VALUE=DATE:{when+timedelta(days=1):%Y%m%d}",
+        f"SUMMARY:{safe(title)}",f"DESCRIPTION:{safe(details + ' Open: ' + FRONTEND_URL)}", f"URL:{FRONTEND_URL}",
+        "BEGIN:VALARM", "TRIGGER:-P1D", "ACTION:DISPLAY", "DESCRIPTION:Reminder", "END:VALARM", "END:VEVENT", "END:VCALENDAR", ""]
+    # Fold long UTF-8 lines as required by iCalendar (75 octets per line).
+    folded=[]
+    for line in lines:
+        part=""
+        for char in line:
+            if len((part+char).encode("utf-8"))>70:
+                folded.append(part)
+                part=" "+char
+            else: part+=char
+        folded.append(part)
+    event="\r\n".join(folded)
+    return {"filename":f"{kind}-{item_id}.ics", "content":base64.b64encode(event.encode()).decode()}
 
 def invite_tenant(db:Session,tasks:BackgroundTasks,tenant:Tenant):
     if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"):
         raise HTTPException(503,"Email is not configured. Set RESEND_API_KEY and EMAIL_FROM first.")
     if tenant.user_id: raise HTTPException(409,"Tenant account already registered")
-    code=secrets.token_urlsafe(32)
-    row=db.get(RegistrationInvite,tenant.id)
+    code=f"{secrets.randbelow(1000000):06d}"
+    row=db.scalar(select(RegistrationInvite).where(RegistrationInvite.tenant_id==tenant.id).with_for_update())
+    now=datetime.now(timezone.utc)
+    last=row.last_sent_at if row else None
+    if last and (last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last)>now-timedelta(minutes=1):
+        raise HTTPException(429,"Wait one minute before sending another code")
     if row is None:
         row=RegistrationInvite(tenant_id=tenant.id,token_hash="",expires_at=datetime.now(timezone.utc))
         db.add(row)
     row.token_hash=hashlib.sha256(code.encode()).hexdigest()
-    row.expires_at=datetime.now(timezone.utc)+timedelta(days=7)
+    row.expires_at=now+timedelta(minutes=15)
+    row.last_sent_at=now
+    row.failed_attempts=0
     db.commit()
-    tasks.add_task(send_email,[tenant.email],"Your chhatralay registration code",f"Your one-time registration code is: {code}\nIt expires in 7 days. Use it when creating your tenant account. If you did not expect this email, contact the administrator.")
+    tasks.add_task(send_email,[tenant.email],"Your registration code",f"Your six-digit code is {code}. It expires in 15 minutes.")
 
-def send_email(recipients: list[str], subject: str, body: str):
+def send_email(recipients: list[str], subject: str, body: str, attachment: Optional[dict]=None):
     key = os.getenv("RESEND_API_KEY", "")
     sender = os.getenv("EMAIL_FROM", "")
     if not key or not sender:
         logging.warning("Email not configured: set RESEND_API_KEY and EMAIL_FROM")
-        return
+        return False
+    success=True
     for recipient in set(x.lower() for x in recipients if x):
         try:
+            payload={"from":sender,"to":[recipient],"subject":subject,"text":body.rstrip()+"\n\nOpen your tenant website: "+FRONTEND_URL}
+            if attachment: payload["attachments"]=[attachment]
             request=urllib.request.Request("https://api.resend.com/emails",
-                data=json.dumps({"from":sender,"to":[recipient],"subject":subject,"text":body}).encode(),
+                data=json.dumps(payload).encode(),
                 headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","User-Agent":"apc-perth/1.0"},method="POST")
             with urllib.request.urlopen(request, timeout=15) as response:
                 if response.status>=300: raise RuntimeError("Email provider rejected request")
         except Exception:
+            success=False
             logging.exception("Notification delivery failed for %s", recipient)
+    return success
 
 def notify(db: Session, tasks: BackgroundTasks, recipients: list[str], subject: str, body: str):
     extra = db.scalars(select(NotificationRecipient)).all()
     admins=db.scalars(select(User).where(User.role=="admin",User.is_active==True)).all()
     tasks.add_task(send_email, recipients + [a.email for a in admins] + [r.email for r in extra], subject, body)
+
+def notify_calendar(db:Session,tasks:BackgroundTasks,tenant:Tenant,kind:str,item_id:int,title:str,when:date,body:str,staff_copy:bool=True):
+    tasks.add_task(send_email,[tenant.email],title,body,calendar_file(kind,item_id,tenant.id,title,when,body))
+    if staff_copy:
+        tasks.add_task(send_email,[a.email for a in db.scalars(select(User).where(User.role=="admin",User.is_active==True))] +
+            [r.email for r in db.scalars(select(NotificationRecipient))],title,f"{tenant.full_name}: {body}")
 
 def payment_json(p: PaymentSubmission, tenant: Tenant):
     return {"id": p.id, "tenant_id": tenant.id, "tenant_name": tenant.full_name,
@@ -197,7 +258,7 @@ def db_session():
     finally: db.close()
 
 def token_for(user: User):
-    return jwt.encode({"sub": str(user.id), "role": user.role, "exp": datetime.now(timezone.utc)+timedelta(hours=12)}, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode({"sub": str(user.id), "role": user.role, "exp": datetime.now(timezone.utc)+timedelta(minutes=15)}, SECRET_KEY, algorithm=ALGORITHM)
 
 def current_user(token: str=Depends(oauth2), db: Session=Depends(db_session)):
     try: user_id = int(jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"])
@@ -216,9 +277,25 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=8)
     invite_code: str
 class TenantIn(BaseModel):
-    full_name: str; email: EmailStr; phone: str=""; current_address: str=""; room: str
+    full_name: str; email: EmailStr; phone: str=""; current_address: str=""; room: str=""
     move_in_date: date; weekly_rent: float=Field(gt=0); bond_amount: float=0
     reference_name: str=""; reference_phone: str=""; reference_email: str=""
+    date_of_birth: Optional[date]=None; parent_phone: str=""; university_name: str=""; course_name: str=""
+    graduation_month: str=Field(default="", pattern=r"^$|^\d{4}-(0[1-9]|1[0-2])$")
+    referee_location: str=""
+class TenantProfileUpdate(BaseModel):
+    full_name: str = Field(min_length=1,max_length=150)
+    phone: str = Field(default="",max_length=40)
+    date_of_birth: Optional[date] = None
+    parent_phone: str = Field(default="",max_length=40)
+    current_address: str = ""
+    move_in_date: date
+    university_name: str = Field(default="",max_length=150)
+    course_name: str = Field(default="",max_length=150)
+    graduation_month: str = Field(default="",pattern=r"^$|^\d{4}-(0[1-9]|1[0-2])$")
+    reference_name: str = Field(default="",max_length=150)
+    reference_phone: str = Field(default="",max_length=40)
+    referee_location: str = Field(default="",max_length=150)
 class ChargeIn(BaseModel):
     tenant_id: int; due_date: date; amount: float=Field(gt=0); note: str=""
 class BulkChargeIn(BaseModel):
@@ -235,6 +312,9 @@ class ReviewIn(BaseModel):
     note: str = Field(default="", max_length=300)
 class RecipientIn(BaseModel):
     email: EmailStr
+class PersonalEmailIn(BaseModel):
+    subject: str = Field(min_length=1,max_length=180)
+    message: str = Field(min_length=1,max_length=3000)
 class PasswordChangeIn(BaseModel):
     old_password: str
     new_password: str = Field(min_length=12)
@@ -242,6 +322,17 @@ class PasswordChangeIn(BaseModel):
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(engine)
+    # Existing installations need these new nullable/defaulted columns before ORM reads.
+    existing={c["name"] for c in inspect(engine).get_columns("tenants")}
+    fields={"date_of_birth":"DATE", "parent_phone":"VARCHAR(40) DEFAULT '' NOT NULL",
+        "university_name":"VARCHAR(150) DEFAULT '' NOT NULL", "course_name":"VARCHAR(150) DEFAULT '' NOT NULL",
+        "graduation_month":"VARCHAR(7) DEFAULT '' NOT NULL", "referee_location":"VARCHAR(150) DEFAULT '' NOT NULL"}
+    with engine.begin() as connection:
+        for name,definition in fields.items():
+            if name not in existing: connection.execute(text(f"ALTER TABLE tenants ADD COLUMN {name} {definition}"))
+        invite_columns={c["name"] for c in inspect(connection).get_columns("registration_invites")}
+        if "failed_attempts" not in invite_columns: connection.execute(text("ALTER TABLE registration_invites ADD COLUMN failed_attempts INTEGER DEFAULT 0 NOT NULL"))
+        if "last_sent_at" not in invite_columns: connection.execute(text("ALTER TABLE registration_invites ADD COLUMN last_sent_at TIMESTAMP WITH TIME ZONE"))
     with SessionLocal() as db:
         if not db.scalar(select(User).where(User.email == ADMIN_EMAIL)):
             db.add(User(email=ADMIN_EMAIL, full_name="Administrator", password_hash=pwd.hash(ADMIN_PASSWORD), role="admin"))
@@ -254,13 +345,16 @@ def health(): return {"status":"ok"}
 def register(data:RegisterIn, tasks:BackgroundTasks, db:Session=Depends(db_session)):
     email=data.email.lower()
     tenant=db.scalar(select(Tenant).where(func.lower(Tenant.email)==email))
-    if not tenant: raise HTTPException(403,"Ask the administrator to add your tenant email first")
+    if not tenant or not tenant.is_active: raise HTTPException(403,"Ask the administrator to add your active tenant email first")
     if tenant.user_id: raise HTTPException(409,"This tenant account is already registered")
-    invite=db.get(RegistrationInvite,tenant.id)
+    invite=db.scalar(select(RegistrationInvite).where(RegistrationInvite.tenant_id==tenant.id).with_for_update())
     expires=invite.expires_at if invite else None
     if expires and expires.tzinfo is None: expires=expires.replace(tzinfo=timezone.utc)
-    if not invite or expires < datetime.now(timezone.utc) or not secrets.compare_digest(invite.token_hash,hashlib.sha256(data.invite_code.encode()).hexdigest()):
-        raise HTTPException(403,"Invalid or expired registration code. Ask the admin to resend it.")
+    if not invite or expires < datetime.now(timezone.utc) or invite.failed_attempts>=5:
+        raise HTTPException(403,"Code expired or locked. Ask the admin to resend it.")
+    if not (len(data.invite_code)==6 and data.invite_code.isascii() and data.invite_code.isdecimal() and secrets.compare_digest(invite.token_hash,hashlib.sha256(data.invite_code.encode()).hexdigest())):
+        invite.failed_attempts+=1; db.commit()
+        raise HTTPException(403,"Invalid code. Ask the admin to resend it after five failed attempts.")
     user=User(email=email,full_name=data.full_name,password_hash=pwd.hash(data.password),role="tenant")
     db.add(user); db.flush(); tenant.user_id=user.id; db.delete(invite); db.commit()
     notify(db,tasks,[tenant.email],"Tenant account created",f"{tenant.full_name} registered their tenant account.")
@@ -271,6 +365,10 @@ def login(form:OAuth2PasswordRequestForm=Depends(), db:Session=Depends(db_sessio
     user=db.scalar(select(User).where(func.lower(User.email)==form.username.lower()))
     if not user or not user.is_active or not pwd.verify(form.password,user.password_hash): raise HTTPException(401,"Incorrect email or password or inactive account")
     return {"access_token":token_for(user),"token_type":"bearer","role":user.role,"name":user.full_name}
+
+@app.post("/api/auth/refresh")
+def refresh(user:User=Depends(current_user)):
+    return {"access_token":token_for(user),"token_type":"bearer"}
 
 @app.post("/api/me/change-password")
 def change_password(data:PasswordChangeIn,user:User=Depends(current_user),db:Session=Depends(db_session)):
@@ -304,6 +402,9 @@ def tenant_profile(tenant:Tenant, db:Session):
     payments=db.scalars(select(PaymentSubmission).where(PaymentSubmission.tenant_id==tenant.id).order_by(PaymentSubmission.id.desc())).all()
     return {"id":tenant.id,"full_name":tenant.full_name,"email":tenant.email,"phone":tenant.phone,
             "current_address":tenant.current_address,"room":tenant.room,"move_in_date":tenant.move_in_date,
+            "date_of_birth":tenant.date_of_birth,"parent_phone":tenant.parent_phone,
+            "university_name":tenant.university_name,"course_name":tenant.course_name,
+            "graduation_month":tenant.graduation_month,"referee_location":tenant.referee_location,
             "weekly_rent":float(tenant.weekly_rent),"bond_amount":float(tenant.bond_amount),
             "reference_name":tenant.reference_name,"reference_phone":tenant.reference_phone,
             "reference_email":tenant.reference_email,"is_active":tenant.is_active,"registered":bool(tenant.user_id),
@@ -339,10 +440,45 @@ def list_tenants(_:User=Depends(admin),db:Session=Depends(db_session)):
     return [{"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,
              "is_active":t.is_active,"registered":bool(t.user_id)} for t in tenants]
 
+@app.get("/api/admin/tenants/report.csv")
+def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
+    """One row per tenant, including archived tenants and financial totals."""
+    rows=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
+    output=io.StringIO()
+    columns=["Tenant number","Status","Registered","Name","Email","Mobile number","Date of birth",
+        "Parent mobile","Home address","Arrival date","University","Course","Graduation month",
+        "Referee name","Referee contact","Referee location","Room","Weekly rent AUD",
+        "Bond AUD","Total charged AUD","Total paid AUD","Outstanding AUD"]
+    writer=csv.writer(output); writer.writerow(columns)
+    def cell(value):
+        s="" if value is None else str(value)
+        return "'"+s if s.lstrip().startswith(("=","+","-","@","\t","\r","\n")) else s
+    for t in rows:
+        charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==t.id)).all()
+        total=sum((c.amount for c in charges),Decimal("0.00"))
+        paid=sum((c.amount_paid for c in charges),Decimal("0.00"))
+        writer.writerow([cell(x) for x in (t.id,"Active" if t.is_active else "Archived",bool(t.user_id),
+            t.full_name,t.email,t.phone,t.date_of_birth,t.parent_phone,t.current_address,t.move_in_date,
+            t.university_name,t.course_name,t.graduation_month,t.reference_name,t.reference_phone,
+            t.referee_location,t.room,t.weekly_rent,t.bond_amount,total,paid,total-paid)])
+    return Response(content="\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":"attachment; filename=apc-tenants-all.csv","Cache-Control":"private, no-store"})
+
 @app.get("/api/admin/tenants/{tenant_id}")
 def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
     tenant=db.get(Tenant,tenant_id)
     if not tenant: raise HTTPException(404,"Tenant not found")
+    return tenant_profile(tenant,db)
+
+@app.patch("/api/admin/tenants/{tenant_id}")
+def edit_tenant(tenant_id:int,data:TenantProfileUpdate,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    for name,value in data.model_dump().items(): setattr(tenant,name,value.strip() if isinstance(value,str) else value)
+    if tenant.user_id:
+        user=db.get(User,tenant.user_id)
+        if user: user.full_name=tenant.full_name
+    db.commit()
     return tenant_profile(tenant,db)
 
 @app.post("/api/admin/tenants/{tenant_id}/archive")
@@ -398,13 +534,23 @@ def resend_invite(tenant_id:int,tasks:BackgroundTasks,_:User=Depends(admin),db:S
     invite_tenant(db,tasks,tenant)
     return {"ok":True}
 
+@app.post("/api/admin/tenants/{tenant_id}/email")
+def email_tenant(tenant_id:int,data:PersonalEmailIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"):
+        raise HTTPException(503,"Email is not configured")
+    tasks.add_task(send_email,[tenant.email],data.subject.strip(),data.message.strip())
+    return {"queued":True,"recipient":tenant.email}
+
 @app.post("/api/admin/charges")
 def add_charge(data:ChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
     tenant=db.scalar(select(Tenant).where(Tenant.id==data.tenant_id).with_for_update())
     if not tenant: raise HTTPException(404,"Tenant not found")
     if not tenant.is_active: raise HTTPException(409,"Restore the archived tenant before adding rent")
     charge=RentCharge(**data.model_dump()); db.add(charge); db.commit()
-    notify(db,tasks,[tenant.email],"Rent charge added",f"A rent charge of AUD {data.amount:.2f} was added for {tenant.full_name}. Sign in to see your balance.")
+    notify_calendar(db,tasks,tenant,"rent",charge.id,"Rent due",data.due_date,
+        f"Rent of AUD {data.amount:.2f} is due on {data.due_date}. Add the attached calendar event and sign in to view your balance.")
     return {"id":charge.id}
 
 @app.post("/api/admin/charges/all")
@@ -413,15 +559,16 @@ def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:
     if not tenants: raise HTTPException(400,"Add an active tenant first")
     if db.get(BulkRentRun,data.due_date): raise HTTPException(409,"Rent charges for this date were already created for all tenants")
     db.add(BulkRentRun(due_date=data.due_date))
-    db.add_all([RentCharge(tenant_id=t.id,due_date=data.due_date,amount=t.weekly_rent,
-                           note="Rent due on "+data.due_date.isoformat()) for t in tenants])
+    charges=[RentCharge(tenant_id=t.id,due_date=data.due_date,amount=t.weekly_rent,
+                           note="Rent due on "+data.due_date.isoformat()) for t in tenants]
+    db.add_all(charges)
     try: db.commit()
     except IntegrityError:
         db.rollback()
         raise HTTPException(409,"Rent charges for this date were already created for all tenants")
-    for t in tenants:
-        notify(db,tasks,[t.email],"Rent due on "+data.due_date.isoformat(),
-               f"Hi {t.full_name}, your rent of AUD {t.weekly_rent:.2f} is due on {data.due_date}. Sign in to view your balance.")
+    for t,c in zip(tenants,charges):
+        notify_calendar(db,tasks,t,"rent",c.id,"Rent due",data.due_date,
+               f"Hi {t.full_name}, rent of AUD {t.weekly_rent:.2f} is due on {data.due_date}. Add the attached calendar event.")
     return {"created":len(tenants),"due_date":data.due_date}
 
 @app.patch("/api/admin/charges/{charge_id}")
@@ -537,6 +684,12 @@ def list_activities(user:User=Depends(current_user),db:Session=Depends(db_sessio
             options=db.scalars(select(PollOption).where(PollOption.poll_id==poll.id)).all()
             vote=db.scalar(select(Vote).where(Vote.poll_id==poll.id,Vote.user_id==user.id))
             item["poll"]={"id":poll.id,"question":poll.question,"voted_option_id":vote.option_id if vote else None,"options":[{"id":o.id,"label":o.label,"votes":db.scalar(select(func.count()).select_from(Vote).where(Vote.option_id==o.id)) if user.role=="admin" else None} for o in options]}
+            if user.role=="admin":
+                voters={v.user_id:v.option_id for v in db.scalars(select(Vote).where(Vote.poll_id==poll.id))}
+                labels={o.id:o.label for o in options}
+                tenants=db.scalars(select(Tenant).order_by(Tenant.full_name)).all()
+                item["poll"]["participation"]=[{"tenant_id":t.id,"name":t.full_name,
+                    "active":t.is_active,"choice":labels.get(voters[t.user_id]) if t.user_id in voters else None} for t in tenants]
         output.append(item)
     return output
 
@@ -549,8 +702,41 @@ def add_activity(data:ActivityIn,tasks:BackgroundTasks,user:User=Depends(admin),
         db.add_all([PollOption(poll_id=poll.id,label=x.strip()) for x in data.options if x.strip()])
     db.commit()
     tenants=db.scalars(select(Tenant).where(Tenant.is_active==True)).all()
-    notify(db,tasks,[t.email for t in tenants],"New activity: "+data.title,f"A new activity, {data.title}, is scheduled for {data.activity_date}. Sign in to see details and vote if a poll is available.")
+    for t in tenants:
+        notify_calendar(db,tasks,t,"activity",activity.id,"Activity: "+data.title,data.activity_date,
+            f"{data.description}\nActivity date: {data.activity_date}. Add the attached event to your calendar and sign in to vote.",staff_copy=False)
+    notify(db,tasks,[],"Activity published: "+data.title,f"Scheduled on {data.activity_date}: {data.title}.")
     return {"id":activity.id}
+
+@app.post("/api/internal/send-reminders")
+def send_reminders(authorization:Optional[str]=Header(default=None),db:Session=Depends(db_session)):
+    expected=os.getenv("REMINDER_SECRET","")
+    if not expected or not authorization or not secrets.compare_digest(authorization,"Bearer "+expected):
+        raise HTTPException(403,"Not allowed")
+    if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"):
+        raise HTTPException(503,"Email is not configured")
+    # A scheduled GitHub Actions request wakes the free Render backend each day.
+    tomorrow=datetime.now(PERTH).date()+timedelta(days=1)
+    # Serialize concurrent schedule/manual runs on Postgres to avoid repeat sends.
+    if engine.dialect.name=="postgresql": db.execute(text("SELECT pg_advisory_xact_lock(71829004)"))
+    sent=0; failed=0
+    for a in db.scalars(select(Activity).where(Activity.activity_date==tomorrow)).all():
+        for t in db.scalars(select(Tenant).where(Tenant.is_active==True)).all():
+            key=("activity",a.id,t.id)
+            if db.scalar(select(ReminderDelivery.id).where(ReminderDelivery.kind==key[0],ReminderDelivery.item_id==key[1],ReminderDelivery.tenant_id==key[2])): continue
+            if send_email([t.email],"Tomorrow: "+a.title,f"Reminder: {a.title} is tomorrow, {tomorrow}. {a.description}"):
+                db.add(ReminderDelivery(kind=key[0],item_id=key[1],tenant_id=key[2])); db.flush(); sent+=1
+            else: failed+=1
+    for c,t in db.execute(select(RentCharge,Tenant).join(Tenant,RentCharge.tenant_id==Tenant.id).where(RentCharge.due_date==tomorrow,Tenant.is_active==True,RentCharge.amount>RentCharge.amount_paid)).all():
+        key=("rent",c.id,t.id)
+        if db.scalar(select(ReminderDelivery.id).where(ReminderDelivery.kind==key[0],ReminderDelivery.item_id==key[1],ReminderDelivery.tenant_id==key[2])): continue
+        due=c.amount-c.amount_paid
+        if send_email([t.email],"Rent due tomorrow",f"Hi {t.full_name}, AUD {due:.2f} is due tomorrow, {tomorrow}. Please sign in to view your balance."):
+            db.add(ReminderDelivery(kind=key[0],item_id=key[1],tenant_id=key[2])); db.flush(); sent+=1
+        else: failed+=1
+    db.commit()
+    if failed: raise HTTPException(503,f"{sent} reminders sent; {failed} failed and will be retried")
+    return {"date":tomorrow,"sent":sent}
 
 @app.post("/api/polls/{poll_id}/vote")
 def vote(poll_id:int,data:VoteIn,tasks:BackgroundTasks,user:User=Depends(current_user),db:Session=Depends(db_session)):

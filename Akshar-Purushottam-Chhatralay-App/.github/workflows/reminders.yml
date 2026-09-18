@@ -1,0 +1,25 @@
+name: Send rent and activity reminders
+
+on:
+  schedule:
+    # 08:15 in Perth (AWST, UTC+08:00) every day.
+    - cron: '15 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Email reminders due tomorrow
+        env:
+          APC_BACKEND_URL: ${{ secrets.APC_BACKEND_URL }}
+          REMINDER_SECRET: ${{ secrets.REMINDER_SECRET }}
+        run: |
+          set -eu
+          if [ -z "$APC_BACKEND_URL" ] || [ -z "$REMINDER_SECRET" ]; then
+            echo 'Set APC_BACKEND_URL and REMINDER_SECRET as repository Actions secrets.' >&2
+            exit 1
+          fi
+          curl --fail --show-error --silent --retry 3 --retry-delay 20 --max-time 300 \
+            -X POST "${APC_BACKEND_URL%/}/api/internal/send-reminders" \
+            -H "Authorization: Bearer $REMINDER_SECRET"
