@@ -94,15 +94,15 @@ class FeatureFlow(unittest.TestCase):
         activity = self.client.post("/api/admin/activities", headers=admin, json={
             "title": "Dinner", "activity_date": tomorrow, "poll_question": "Coming?", "options": ["Yes", "No"]})
         self.assertEqual(activity.status_code, 200, activity.text)
-        polls = self.client.get("/api/activities", headers=admin).json()
-        self.assertTrue(all(row["choice"] is None for row in polls[0]["poll"]["participation"]))
-        poll_id = polls[0]["poll"]["id"]
-        choice_id = polls[0]["poll"]["options"][0]["id"]
+        poll_activity = next(row for row in self.client.get("/api/activities", headers=admin).json() if row["id"]==activity.json()["id"])
+        self.assertTrue(all(row["choice"] is None for row in poll_activity["poll"]["participation"]))
+        poll_id = poll_activity["poll"]["id"]
+        choice_id = poll_activity["poll"]["options"][0]["id"]
         self.assertEqual(self.client.post(f"/api/polls/{poll_id}/vote", headers=tenant,
             json={"option_id": choice_id}).status_code, 200)
-        votes = self.client.get("/api/activities", headers=admin).json()[0]["poll"]["participation"]
+        votes = next(row for row in self.client.get("/api/activities", headers=admin).json() if row["id"]==activity.json()["id"])["poll"]["participation"]
         self.assertEqual(next(row for row in votes if row["tenant_id"] == tenant_id)["choice"], "Yes")
-        self.assertNotIn("participation", self.client.get("/api/activities", headers=tenant).json()[0]["poll"])
+        self.assertNotIn("participation", next(row for row in self.client.get("/api/activities", headers=tenant).json() if row["id"]==activity.json()["id"])["poll"])
 
         charge = self.client.post("/api/admin/charges/all", headers=admin, json={"due_date": tomorrow})
         self.assertEqual(charge.status_code, 200, charge.text)
@@ -131,6 +131,108 @@ class FeatureFlow(unittest.TestCase):
             self.assertTrue(type(self).original_send_email(["tenant@example.com"], "Please review", "Hello", calendar))
         self.assertIn("Open your tenant website: ", requests[0]["text"])
         self.assertEqual(requests[0]["attachments"][0]["filename"], "rent-9.ics")
+
+    def test_completed_activities_are_compact_and_votes_close(self):
+        main=self.main
+        today=datetime.now(ZoneInfo("Australia/Perth")).date()
+        with main.SessionLocal() as db:
+            admin=db.query(main.User).filter_by(email="admin@example.com").one()
+            voter=main.User(email="past-voter@example.com",full_name="Past Voter",password_hash="unused",role="tenant")
+            nonvoter=main.User(email="past-nonvoter@example.com",full_name="Past Nonvoter",password_hash="unused",role="tenant")
+            db.add_all([voter,nonvoter]);db.flush()
+            past=main.Activity(title="Past outing",description="Private activity details",activity_date=today-timedelta(days=1),created_by=admin.id)
+            future=main.Activity(title="Future outing",description="Upcoming details",activity_date=today+timedelta(days=3),created_by=admin.id)
+            db.add_all([past,future]);db.flush()
+            poll=main.Poll(activity_id=past.id,question="Attend?");db.add(poll);db.flush()
+            yes=main.PollOption(poll_id=poll.id,label="Yes");db.add(yes);db.flush()
+            db.add(main.Vote(poll_id=poll.id,option_id=yes.id,user_id=voter.id))
+            db.commit()
+            past_id,future_id,poll_id,option_id=past.id,future.id,poll.id,yes.id
+            voter_token=main.token_for(voter);nonvoter_token=main.token_for(nonvoter);admin_token=main.token_for(admin)
+        def activities(token):
+            return self.client.get("/api/activities",headers={"Authorization":"Bearer "+token}).json()
+        tenant_past=next(a for a in activities(voter_token) if a["id"]==past_id)
+        self.assertEqual(tenant_past["my_vote"]["choice"],"Yes")
+        self.assertIn("submitted_on",tenant_past["my_vote"])
+        self.assertNotIn("description",tenant_past)
+        self.assertIsNone(tenant_past["poll"])
+        self.assertNotIn(past_id,[a["id"] for a in activities(nonvoter_token)])
+        self.assertEqual(next(a for a in activities(nonvoter_token) if a["id"]==future_id)["description"],"Upcoming details")
+        admin_past=next(a for a in activities(admin_token) if a["id"]==past_id)
+        self.assertNotIn("description",admin_past)
+        self.assertEqual(admin_past["poll"]["summary"],[{"label":"Yes","votes":1}])
+        self.assertEqual(admin_past["poll"]["total_votes"],1)
+        self.assertEqual(self.client.post(f"/api/polls/{poll_id}/vote",headers={"Authorization":"Bearer "+nonvoter_token},json={"option_id":option_id}).status_code,409)
+
+    def test_roles_photos_and_retention(self):
+        from decimal import Decimal
+        from datetime import timezone
+        main=self.main
+        login=self.client.post("/api/auth/login",data={"username":"admin@example.com","password":"a-test-password"})
+        admin={"Authorization":"Bearer "+login.json()["access_token"]}
+
+        def create(role,email,rent):
+            created=self.client.post("/api/admin/tenants",headers=admin,json={"full_name":email,
+                "email":email,"move_in_date":"2025-01-01","weekly_rent":rent,"account_role":role})
+            self.assertEqual(created.status_code,200,created.text)
+            code=re.search(r"\b\d{6}\b",next(msg[2] for msg in reversed(self.emails)
+                if msg[1]=="Your registration code" and email in msg[0])).group()
+            registration=self.client.post("/api/auth/register",json={"full_name":email,
+                "email":email,"password":"a-secure-test-password","invite_code":code})
+            self.assertEqual(registration.status_code,200,registration.text)
+            return created.json()["id"],{"Authorization":"Bearer "+registration.json()["access_token"]}
+
+        admin_id,admin_only=create("admin","second-admin@example.com",0)
+        dual_id,dual=create("tenant_admin","dual@example.com",150)
+        self.assertEqual(self.client.get("/api/admin/tenants",headers=admin_only).status_code,200)
+        self.assertEqual(self.client.get("/api/me",headers=admin_only).json().get("tenant"),None)
+        self.assertEqual(self.client.post("/api/payments",headers=admin_only,data={"amount":"1",
+            "payment_date":"2025-01-01","bank_reference":"FORBIDDEN"}).status_code,403)
+        self.assertEqual(self.client.get("/api/me",headers=dual).json()["tenant"]["id"],dual_id)
+        self.assertEqual(self.client.get("/api/admin/tenants",headers=dual).status_code,200)
+        self.assertEqual(self.client.post("/api/admin/charges",headers=admin,json={"tenant_id":admin_id,
+            "due_date":"2025-01-01","amount":1}).status_code,403)
+        charge=self.client.post("/api/admin/charges",headers=admin,json={"tenant_id":dual_id,
+            "due_date":"2025-01-01","amount":30}).json()["id"]
+        claim=self.client.post("/api/payments",headers=dual,data={"amount":"23.00",
+            "payment_date":"2025-01-01","bank_reference":"DUAL-1"})
+        self.assertEqual(claim.status_code,200,claim.text)
+        self.assertEqual(self.client.post(f"/api/admin/payments/{claim.json()['id']}/review",headers=dual,
+            json={"decision":"approved"}).status_code,403)
+        self.assertEqual(self.client.post(f"/api/admin/payments/{claim.json()['id']}/review",headers=admin,
+            json={"decision":"approved"}).status_code,200)
+        self.assertEqual(self.client.patch(f"/api/admin/charges/{charge}",headers=admin,
+            json={"amount_paid":30,"payment_date":"2025-01-02"}).status_code,200)
+        tiny_png=b"\x89PNG\r\n\x1a\n"+b"photo-data"
+        self.assertEqual(self.client.post(f"/api/admin/tenants/{dual_id}/photo",headers=admin,
+            files={"photo":("face.png",tiny_png,"image/png")}).status_code,200)
+        self.assertEqual(self.client.get(f"/api/tenants/{dual_id}/photo",headers=dual).content,tiny_png)
+        other_id,other=create("tenant","other@example.com",100)
+        self.assertEqual(self.client.get(f"/api/tenants/{dual_id}/photo",headers=other).status_code,404)
+        self.assertEqual(self.client.get(f"/api/tenants/{dual_id}/photo").status_code,401)
+
+        old=datetime.now(timezone.utc)-timedelta(days=367)
+        with main.SessionLocal() as db:
+            payment=db.get(main.PaymentSubmission,claim.json()["id"])
+            payment.submitted_at=old
+            payment.receipt=tiny_png
+            payment.receipt_type="image/png"
+            for manual in db.scalars(main.select(main.ManualPayment).where(main.ManualPayment.tenant_id==dual_id)):
+                manual.created_at=old
+            db.commit()
+        before=self.client.get("/api/admin/collections?year=2025",headers=admin).json()
+        amount=lambda result:next(x["collected"] for x in result["tenants"] if x["tenant_id"]==dual_id)
+        self.assertEqual(amount(before),30)
+        self.assertEqual(self.client.post("/api/internal/prune-payments").status_code,403)
+        secret={"Authorization":"Bearer test-reminder-placeholder"}
+        pruned=self.client.post("/api/internal/prune-payments",headers=secret)
+        self.assertEqual(pruned.status_code,200,pruned.text)
+        self.assertEqual(pruned.json()["deleted_submissions"],1)
+        self.assertEqual(pruned.json()["deleted_manual_payments"],1)
+        self.assertEqual(self.client.post("/api/internal/prune-payments",headers=secret).json()["deleted_submissions"],0)
+        self.assertEqual(amount(self.client.get("/api/admin/collections?year=2025",headers=admin).json()),30)
+        self.assertEqual(self.client.get("/api/me",headers=dual).json()["tenant"]["balance"],0)
+        self.assertEqual(self.client.get("/api/payments",headers=dual).json(),[])
 
 
 if __name__ == "__main__":

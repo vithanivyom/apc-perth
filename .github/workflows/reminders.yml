@@ -23,3 +23,14 @@ jobs:
           curl --fail --show-error --silent --retry 3 --retry-delay 20 --max-time 300 \
             -X POST "${APC_BACKEND_URL%/}/api/internal/send-reminders" \
             -H "Authorization: Bearer $REMINDER_SECRET"
+      - name: Archive totals and delete payment records older than 365 days
+        if: always()
+        env:
+          APC_BACKEND_URL: ${{ secrets.APC_BACKEND_URL }}
+          REMINDER_SECRET: ${{ secrets.REMINDER_SECRET }}
+        run: |
+          set -eu
+          test -n "$APC_BACKEND_URL" && test -n "$REMINDER_SECRET"
+          curl --fail --show-error --silent --retry 3 --retry-delay 20 --max-time 300 \
+            -X POST "${APC_BACKEND_URL%/}/api/internal/prune-payments" \
+            -H "Authorization: Bearer $REMINDER_SECRET"

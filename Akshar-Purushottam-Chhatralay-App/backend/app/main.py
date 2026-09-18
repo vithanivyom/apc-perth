@@ -67,6 +67,9 @@ class Tenant(Base):
     course_name: Mapped[str] = mapped_column(String(150), default="")
     graduation_month: Mapped[str] = mapped_column(String(7), default="")
     referee_location: Mapped[str] = mapped_column(String(150), default="")
+    account_role: Mapped[str] = mapped_column(String(20), default="tenant")
+    photo: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    photo_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 class RentCharge(Base):
@@ -87,6 +90,12 @@ class ManualPayment(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(10,2))
     payment_date: Mapped[date] = mapped_column(Date, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class ArchivedCollection(Base):
+    __tablename__ = "archived_collections"
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    year: Mapped[int] = mapped_column(Integer, primary_key=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12,2), default=0)
 
 class BulkRentRun(Base):
     __tablename__ = "bulk_rent_runs"
@@ -229,13 +238,13 @@ def send_email(recipients: list[str], subject: str, body: str, attachment: Optio
 
 def notify(db: Session, tasks: BackgroundTasks, recipients: list[str], subject: str, body: str):
     extra = db.scalars(select(NotificationRecipient)).all()
-    admins=db.scalars(select(User).where(User.role=="admin",User.is_active==True)).all()
+    admins=db.scalars(select(User).where(User.role.in_(("admin","tenant_admin")),User.is_active==True)).all()
     tasks.add_task(send_email, recipients + [a.email for a in admins] + [r.email for r in extra], subject, body)
 
 def notify_calendar(db:Session,tasks:BackgroundTasks,tenant:Tenant,kind:str,item_id:int,title:str,when:date,body:str,staff_copy:bool=True):
     tasks.add_task(send_email,[tenant.email],title,body,calendar_file(kind,item_id,tenant.id,title,when,body))
     if staff_copy:
-        tasks.add_task(send_email,[a.email for a in db.scalars(select(User).where(User.role=="admin",User.is_active==True))] +
+        tasks.add_task(send_email,[a.email for a in db.scalars(select(User).where(User.role.in_(("admin","tenant_admin")),User.is_active==True))] +
             [r.email for r in db.scalars(select(NotificationRecipient))],title,f"{tenant.full_name}: {body}")
 
 def payment_json(p: PaymentSubmission, tenant: Tenant):
@@ -268,7 +277,7 @@ def current_user(token: str=Depends(oauth2), db: Session=Depends(db_session)):
     return user
 
 def admin(user: User=Depends(current_user)):
-    if user.role != "admin": raise HTTPException(403, "Admin access required")
+    if user.role not in ("admin","tenant_admin"): raise HTTPException(403, "Admin access required")
     return user
 
 class RegisterIn(BaseModel):
@@ -278,7 +287,8 @@ class RegisterIn(BaseModel):
     invite_code: str
 class TenantIn(BaseModel):
     full_name: str; email: EmailStr; phone: str=""; current_address: str=""; room: str=""
-    move_in_date: date; weekly_rent: float=Field(gt=0); bond_amount: float=0
+    move_in_date: date; weekly_rent: float=Field(ge=0); bond_amount: float=0
+    account_role: str = Field(default="tenant", pattern=r"^(tenant|admin|tenant_admin)$")
     reference_name: str=""; reference_phone: str=""; reference_email: str=""
     date_of_birth: Optional[date]=None; parent_phone: str=""; university_name: str=""; course_name: str=""
     graduation_month: str=Field(default="", pattern=r"^$|^\d{4}-(0[1-9]|1[0-2])$")
@@ -326,7 +336,8 @@ def startup():
     existing={c["name"] for c in inspect(engine).get_columns("tenants")}
     fields={"date_of_birth":"DATE", "parent_phone":"VARCHAR(40) DEFAULT '' NOT NULL",
         "university_name":"VARCHAR(150) DEFAULT '' NOT NULL", "course_name":"VARCHAR(150) DEFAULT '' NOT NULL",
-        "graduation_month":"VARCHAR(7) DEFAULT '' NOT NULL", "referee_location":"VARCHAR(150) DEFAULT '' NOT NULL"}
+        "graduation_month":"VARCHAR(7) DEFAULT '' NOT NULL", "referee_location":"VARCHAR(150) DEFAULT '' NOT NULL",
+        "account_role":"VARCHAR(20) DEFAULT 'tenant' NOT NULL", "photo":"BYTEA", "photo_type":"VARCHAR(30)"}
     with engine.begin() as connection:
         for name,definition in fields.items():
             if name not in existing: connection.execute(text(f"ALTER TABLE tenants ADD COLUMN {name} {definition}"))
@@ -355,10 +366,10 @@ def register(data:RegisterIn, tasks:BackgroundTasks, db:Session=Depends(db_sessi
     if not (len(data.invite_code)==6 and data.invite_code.isascii() and data.invite_code.isdecimal() and secrets.compare_digest(invite.token_hash,hashlib.sha256(data.invite_code.encode()).hexdigest())):
         invite.failed_attempts+=1; db.commit()
         raise HTTPException(403,"Invalid code. Ask the admin to resend it after five failed attempts.")
-    user=User(email=email,full_name=data.full_name,password_hash=pwd.hash(data.password),role="tenant")
+    user=User(email=email,full_name=tenant.full_name,password_hash=pwd.hash(data.password),role=tenant.account_role)
     db.add(user); db.flush(); tenant.user_id=user.id; db.delete(invite); db.commit()
     notify(db,tasks,[tenant.email],"Tenant account created",f"{tenant.full_name} registered their tenant account.")
-    return {"access_token":token_for(user),"token_type":"bearer","role":"tenant"}
+    return {"access_token":token_for(user),"token_type":"bearer","role":user.role}
 
 @app.post("/api/auth/login")
 def login(form:OAuth2PasswordRequestForm=Depends(), db:Session=Depends(db_session)):
@@ -380,7 +391,7 @@ def change_password(data:PasswordChangeIn,user:User=Depends(current_user),db:Ses
 @app.get("/api/me")
 def me(user:User=Depends(current_user),db:Session=Depends(db_session)):
     base={"id":user.id,"name":user.full_name,"email":user.email,"role":user.role}
-    if user.role=="tenant":
+    if user.role in ("tenant","tenant_admin"):
         tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id))
         if tenant:
             charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant.id).order_by(RentCharge.due_date.desc())).all()
@@ -389,7 +400,7 @@ def me(user:User=Depends(current_user),db:Session=Depends(db_session)):
 
 @app.get("/api/admin/dashboard")
 def dashboard(_:User=Depends(admin),db:Session=Depends(db_session)):
-    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True).order_by(Tenant.full_name)).all()
+    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True,Tenant.account_role!="admin").order_by(Tenant.full_name)).all()
     rows=[]
     for t in tenants:
         charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==t.id)).all()
@@ -408,6 +419,7 @@ def tenant_profile(tenant:Tenant, db:Session):
             "weekly_rent":float(tenant.weekly_rent),"bond_amount":float(tenant.bond_amount),
             "reference_name":tenant.reference_name,"reference_phone":tenant.reference_phone,
             "reference_email":tenant.reference_email,"is_active":tenant.is_active,"registered":bool(tenant.user_id),
+            "account_role":tenant.account_role,"has_photo":bool(tenant.photo),
             "charges":[{"id":c.id,"due_date":c.due_date,"amount":float(c.amount),"paid":float(c.amount_paid),"note":c.note} for c in charges],
             "payments":[payment_json(p,tenant) for p in payments]}
 
@@ -421,14 +433,17 @@ def collections(year:int, _:User=Depends(admin),db:Session=Depends(db_session)):
         amounts[p.tenant_id]+=p.amount
     for p in db.scalars(select(ManualPayment).where(ManualPayment.payment_date>=start,ManualPayment.payment_date<end)):
         amounts[p.tenant_id]+=p.amount
+    for archived in db.scalars(select(ArchivedCollection).where(ArchivedCollection.year==year)):
+        amounts[archived.tenant_id]+=archived.amount
     approved=db.execute(select(PaymentSubmission.tenant_id,func.sum(PaymentSubmission.amount)).where(PaymentSubmission.state=="approved").group_by(PaymentSubmission.tenant_id)).all()
     manually_recorded=db.execute(select(ManualPayment.tenant_id,func.sum(ManualPayment.amount)).group_by(ManualPayment.tenant_id)).all()
     from_submissions=dict(approved)
     from_manual=dict(manually_recorded)
+    archived_totals=dict(db.execute(select(ArchivedCollection.tenant_id,func.sum(ArchivedCollection.amount)).group_by(ArchivedCollection.tenant_id)).all())
     rows=[]
     for t in tenants:
         total_paid=db.scalar(select(func.sum(RentCharge.amount_paid)).where(RentCharge.tenant_id==t.id)) or Decimal("0.00")
-        historical=max(Decimal("0.00"),total_paid-(from_submissions.get(t.id) or 0)-(from_manual.get(t.id) or 0))
+        historical=max(Decimal("0.00"),total_paid-(from_submissions.get(t.id) or 0)-(from_manual.get(t.id) or 0)-(archived_totals.get(t.id) or 0))
         rows.append({"tenant_id":t.id,"name":t.full_name,"room":t.room,"active":t.is_active,
                      "collected":float(amounts[t.id]),"historical_undated":float(historical)})
     return {"year":year,"start":start,"end_exclusive":end,"total":float(sum(amounts.values())),
@@ -438,14 +453,14 @@ def collections(year:int, _:User=Depends(admin),db:Session=Depends(db_session)):
 def list_tenants(_:User=Depends(admin),db:Session=Depends(db_session)):
     tenants=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
     return [{"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,
-             "is_active":t.is_active,"registered":bool(t.user_id)} for t in tenants]
+             "is_active":t.is_active,"registered":bool(t.user_id),"account_role":t.account_role} for t in tenants]
 
 @app.get("/api/admin/tenants/report.csv")
 def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
     """One row per tenant, including archived tenants and financial totals."""
     rows=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
     output=io.StringIO()
-    columns=["Tenant number","Status","Registered","Name","Email","Mobile number","Date of birth",
+    columns=["Tenant number","Status","Registered","Role","Name","Email","Mobile number","Date of birth",
         "Parent mobile","Home address","Arrival date","University","Course","Graduation month",
         "Referee name","Referee contact","Referee location","Room","Weekly rent AUD",
         "Bond AUD","Total charged AUD","Total paid AUD","Outstanding AUD"]
@@ -457,7 +472,7 @@ def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
         charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==t.id)).all()
         total=sum((c.amount for c in charges),Decimal("0.00"))
         paid=sum((c.amount_paid for c in charges),Decimal("0.00"))
-        writer.writerow([cell(x) for x in (t.id,"Active" if t.is_active else "Archived",bool(t.user_id),
+        writer.writerow([cell(x) for x in (t.id,"Active" if t.is_active else "Archived",bool(t.user_id),t.account_role,
             t.full_name,t.email,t.phone,t.date_of_birth,t.parent_phone,t.current_address,t.move_in_date,
             t.university_name,t.course_name,t.graduation_month,t.reference_name,t.reference_phone,
             t.referee_location,t.room,t.weekly_rent,t.bond_amount,total,paid,total-paid)])
@@ -469,6 +484,35 @@ def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_ses
     tenant=db.get(Tenant,tenant_id)
     if not tenant: raise HTTPException(404,"Tenant not found")
     return tenant_profile(tenant,db)
+
+@app.get("/api/tenants/{tenant_id}/photo")
+def tenant_photo(tenant_id:int,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant or (user.role not in ("admin","tenant_admin") and tenant.user_id!=user.id):
+        raise HTTPException(404,"Photo not found")
+    if not tenant.photo: raise HTTPException(404,"Photo not found")
+    return Response(tenant.photo,media_type=tenant.photo_type,
+        headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
+
+@app.post("/api/admin/tenants/{tenant_id}/photo")
+async def upload_tenant_photo(tenant_id:int,photo:UploadFile=File(...),_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    content=await photo.read(1024*1024+1)
+    if len(content)>1024*1024: raise HTTPException(413,"Photo must be smaller than 1 MB")
+    if content.startswith(b"\xff\xd8\xff"): media="image/jpeg"
+    elif content.startswith(b"\x89PNG\r\n\x1a\n"): media="image/png"
+    elif content[:4]==b"RIFF" and content[8:12]==b"WEBP": media="image/webp"
+    else: raise HTTPException(415,"Choose a JPG, PNG or WebP photo")
+    tenant.photo=content;tenant.photo_type=media;db.commit()
+    return {"ok":True}
+
+@app.delete("/api/admin/tenants/{tenant_id}/photo")
+def remove_tenant_photo(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    tenant.photo=None;tenant.photo_type=None;db.commit()
+    return {"ok":True}
 
 @app.patch("/api/admin/tenants/{tenant_id}")
 def edit_tenant(tenant_id:int,data:TenantProfileUpdate,_:User=Depends(admin),db:Session=Depends(db_session)):
@@ -512,7 +556,7 @@ def restore_tenant(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_ses
 
 @app.get("/api/me/profile")
 def my_profile(user:User=Depends(current_user),db:Session=Depends(db_session)):
-    if user.role!="tenant": raise HTTPException(403,"Tenant access required")
+    if user.role not in ("tenant","tenant_admin"): raise HTTPException(403,"Tenant access required")
     tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id))
     if not tenant: raise HTTPException(404,"Your tenant profile is not linked")
     return tenant_profile(tenant,db)
@@ -522,6 +566,8 @@ def add_tenant(data:TenantIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Sess
     if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"):
         raise HTTPException(503,"Email is not configured. Set RESEND_API_KEY and EMAIL_FROM first.")
     if db.scalar(select(Tenant).where(func.lower(Tenant.email)==data.email.lower())): raise HTTPException(409,"Tenant email already exists")
+    if db.scalar(select(User).where(func.lower(User.email)==data.email.lower())): raise HTTPException(409,"An account with this email already exists")
+    if data.account_role!="admin" and data.weekly_rent<=0: raise HTTPException(400,"Weekly rent is required for a tenant")
     tenant=Tenant(**data.model_dump()); tenant.email=data.email.lower(); db.add(tenant); db.commit(); db.refresh(tenant)
     invite_tenant(db,tasks,tenant)
     notify(db,tasks,[],"New tenant added",f"Tenant {tenant.full_name} was added. Sign in to review details.")
@@ -548,6 +594,7 @@ def add_charge(data:ChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Sess
     tenant=db.scalar(select(Tenant).where(Tenant.id==data.tenant_id).with_for_update())
     if not tenant: raise HTTPException(404,"Tenant not found")
     if not tenant.is_active: raise HTTPException(409,"Restore the archived tenant before adding rent")
+    if tenant.account_role=="admin": raise HTTPException(403,"Admin-only profiles do not pay rent")
     charge=RentCharge(**data.model_dump()); db.add(charge); db.commit()
     notify_calendar(db,tasks,tenant,"rent",charge.id,"Rent due",data.due_date,
         f"Rent of AUD {data.amount:.2f} is due on {data.due_date}. Add the attached calendar event and sign in to view your balance.")
@@ -555,7 +602,7 @@ def add_charge(data:ChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Sess
 
 @app.post("/api/admin/charges/all")
 def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Session=Depends(db_session)):
-    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True).order_by(Tenant.id).with_for_update()).all()
+    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True,Tenant.account_role!="admin").order_by(Tenant.id).with_for_update()).all()
     if not tenants: raise HTTPException(400,"Add an active tenant first")
     if db.get(BulkRentRun,data.due_date): raise HTTPException(409,"Rent charges for this date were already created for all tenants")
     db.add(BulkRentRun(due_date=data.due_date))
@@ -596,7 +643,7 @@ def my_payments(user:User=Depends(current_user),db:Session=Depends(db_session)):
 async def submit_payment(tasks:BackgroundTasks,amount:Decimal=Form(...),payment_date:date=Form(...),
                          bank_reference:str=Form(...),bank_details:str=Form(""),receipt:Optional[UploadFile]=File(None),
                          user:User=Depends(current_user),db:Session=Depends(db_session)):
-    if user.role!="tenant": raise HTTPException(403,"Tenant access required")
+    if user.role not in ("tenant","tenant_admin"): raise HTTPException(403,"Tenant access required")
     tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id,Tenant.is_active==True))
     if not tenant: raise HTTPException(403,"Tenant record unavailable")
     if amount<=0 or amount>1000000 or amount.as_tuple().exponent < -2: raise HTTPException(400,"Enter a valid amount in dollars and cents")
@@ -638,6 +685,7 @@ def review_payment(payment_id:int,data:ReviewIn,tasks:BackgroundTasks,user:User=
     if not payment: raise HTTPException(404,"Submission not found")
     if payment.state!="pending": raise HTTPException(409,"Payment already reviewed")
     tenant=db.get(Tenant,payment.tenant_id)
+    if tenant.user_id==user.id: raise HTTPException(403,"You cannot review your own payment")
     if data.decision=="approved":
         charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant.id).order_by(RentCharge.due_date,RentCharge.id).with_for_update()).all()
         remaining=payment.amount
@@ -677,19 +725,37 @@ def delete_recipient(recipient_id:int,_:User=Depends(admin),db:Session=Depends(d
 def list_activities(user:User=Depends(current_user),db:Session=Depends(db_session)):
     activities=db.scalars(select(Activity).order_by(Activity.activity_date.desc())).all()
     output=[]
+    today=datetime.now(PERTH).date()
+    is_staff=user.role in ("admin","tenant_admin")
     for a in activities:
         poll=db.scalar(select(Poll).where(Poll.activity_id==a.id))
-        item={"id":a.id,"title":a.title,"description":a.description,"date":a.activity_date,"poll":None}
+        completed=a.activity_date<today
+        item={"id":a.id,"title":a.title,"date":a.activity_date,"completed":completed,"poll":None}
+        if not completed:
+            item["description"]=a.description
         if poll:
             options=db.scalars(select(PollOption).where(PollOption.poll_id==poll.id)).all()
             vote=db.scalar(select(Vote).where(Vote.poll_id==poll.id,Vote.user_id==user.id))
-            item["poll"]={"id":poll.id,"question":poll.question,"voted_option_id":vote.option_id if vote else None,"options":[{"id":o.id,"label":o.label,"votes":db.scalar(select(func.count()).select_from(Vote).where(Vote.option_id==o.id)) if user.role=="admin" else None} for o in options]}
-            if user.role=="admin":
+            labels={o.id:o.label for o in options}
+            if completed:
+                if not is_staff and not vote:
+                    continue
+                if vote:
+                    submitted=vote.created_at
+                    if submitted.tzinfo is None: submitted=submitted.replace(tzinfo=timezone.utc)
+                    item["my_vote"]={"choice":labels.get(vote.option_id,"Unknown option"),"submitted_on":submitted.astimezone(PERTH).date()}
+                if is_staff:
+                    counts={option_id:count for option_id,count in db.execute(select(Vote.option_id,func.count()).where(Vote.poll_id==poll.id).group_by(Vote.option_id))}
+                    item["poll"]={"question":poll.question,"summary":[{"label":o.label,"votes":counts.get(o.id,0)} for o in options],"total_votes":sum(counts.values())}
+            else:
+                item["poll"]={"id":poll.id,"question":poll.question,"voted_option_id":vote.option_id if vote else None,"options":[{"id":o.id,"label":o.label,"votes":db.scalar(select(func.count()).select_from(Vote).where(Vote.option_id==o.id)) if is_staff else None} for o in options]}
+            if is_staff:
                 voters={v.user_id:v.option_id for v in db.scalars(select(Vote).where(Vote.poll_id==poll.id))}
-                labels={o.id:o.label for o in options}
-                tenants=db.scalars(select(Tenant).order_by(Tenant.full_name)).all()
+                tenants=db.scalars(select(Tenant).where(Tenant.account_role!="admin").order_by(Tenant.full_name)).all()
                 item["poll"]["participation"]=[{"tenant_id":t.id,"name":t.full_name,
                     "active":t.is_active,"choice":labels.get(voters[t.user_id]) if t.user_id in voters else None} for t in tenants]
+        elif completed and not is_staff:
+            continue
         output.append(item)
     return output
 
@@ -701,7 +767,7 @@ def add_activity(data:ActivityIn,tasks:BackgroundTasks,user:User=Depends(admin),
         poll=Poll(activity_id=activity.id,question=data.poll_question); db.add(poll); db.flush()
         db.add_all([PollOption(poll_id=poll.id,label=x.strip()) for x in data.options if x.strip()])
     db.commit()
-    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True)).all()
+    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True,Tenant.account_role!="admin")).all()
     for t in tenants:
         notify_calendar(db,tasks,t,"activity",activity.id,"Activity: "+data.title,data.activity_date,
             f"{data.description}\nActivity date: {data.activity_date}. Add the attached event to your calendar and sign in to vote.",staff_copy=False)
@@ -721,7 +787,7 @@ def send_reminders(authorization:Optional[str]=Header(default=None),db:Session=D
     if engine.dialect.name=="postgresql": db.execute(text("SELECT pg_advisory_xact_lock(71829004)"))
     sent=0; failed=0
     for a in db.scalars(select(Activity).where(Activity.activity_date==tomorrow)).all():
-        for t in db.scalars(select(Tenant).where(Tenant.is_active==True)).all():
+        for t in db.scalars(select(Tenant).where(Tenant.is_active==True,Tenant.account_role!="admin")).all():
             key=("activity",a.id,t.id)
             if db.scalar(select(ReminderDelivery.id).where(ReminderDelivery.kind==key[0],ReminderDelivery.item_id==key[1],ReminderDelivery.tenant_id==key[2])): continue
             if send_email([t.email],"Tomorrow: "+a.title,f"Reminder: {a.title} is tomorrow, {tomorrow}. {a.description}"):
@@ -738,11 +804,37 @@ def send_reminders(authorization:Optional[str]=Header(default=None),db:Session=D
     if failed: raise HTTPException(503,f"{sent} reminders sent; {failed} failed and will be retried")
     return {"date":tomorrow,"sent":sent}
 
+@app.post("/api/internal/prune-payments")
+def prune_payments(authorization:Optional[str]=Header(default=None),db:Session=Depends(db_session)):
+    expected=os.getenv("REMINDER_SECRET","")
+    if not expected or not authorization or not secrets.compare_digest(authorization,"Bearer "+expected):
+        raise HTTPException(403,"Not allowed")
+    cutoff=datetime.now(timezone.utc)-timedelta(days=365)
+    if engine.dialect.name=="postgresql": db.execute(text("SELECT pg_advisory_xact_lock(71829005)"))
+    submissions=db.scalars(select(PaymentSubmission).where(PaymentSubmission.submitted_at<cutoff)).all()
+    manual=db.scalars(select(ManualPayment).where(ManualPayment.created_at<cutoff)).all()
+    # Keep compact tenant/year totals for collection reports. Charge balances live in rent_charges.
+    totals={}
+    for p in submissions:
+        if p.state=="approved": totals[(p.tenant_id,p.payment_date.year)]=totals.get((p.tenant_id,p.payment_date.year),Decimal("0.00"))+p.amount
+    for p in manual:
+        totals[(p.tenant_id,p.payment_date.year)]=totals.get((p.tenant_id,p.payment_date.year),Decimal("0.00"))+p.amount
+    for (tenant_id,year),amount in totals.items():
+        row=db.get(ArchivedCollection,(tenant_id,year))
+        if row: row.amount+=amount
+        else: db.add(ArchivedCollection(tenant_id=tenant_id,year=year,amount=amount))
+    for p in submissions: db.delete(p)
+    for p in manual: db.delete(p)
+    db.commit()
+    return {"deleted_submissions":len(submissions),"deleted_manual_payments":len(manual),"cutoff":cutoff}
+
 @app.post("/api/polls/{poll_id}/vote")
 def vote(poll_id:int,data:VoteIn,tasks:BackgroundTasks,user:User=Depends(current_user),db:Session=Depends(db_session)):
-    if user.role!="tenant": raise HTTPException(403,"Only tenants can vote")
+    if user.role not in ("tenant","tenant_admin"): raise HTTPException(403,"Only tenants can vote")
     poll=db.get(Poll,poll_id); option=db.get(PollOption,data.option_id)
     if not poll or not poll.is_active or not option or option.poll_id!=poll_id: raise HTTPException(400,"Invalid poll option")
+    activity=db.get(Activity,poll.activity_id)
+    if not activity or activity.activity_date<datetime.now(PERTH).date(): raise HTTPException(409,"Voting has closed for this activity")
     if db.scalar(select(Vote).where(Vote.poll_id==poll_id,Vote.user_id==user.id)): raise HTTPException(409,"You have already voted")
     db.add(Vote(poll_id=poll_id,option_id=data.option_id,user_id=user.id)); db.commit()
     notify(db,tasks,[user.email],"Activity vote received",f"A vote was submitted for activity poll #{poll_id}. Sign in to see the poll.")
