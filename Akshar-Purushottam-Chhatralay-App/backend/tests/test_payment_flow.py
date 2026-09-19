@@ -25,7 +25,7 @@ class PaymentFlow(unittest.TestCase):
             login = client.post("/api/auth/login", data={"username":"admin@example.com","password":"test-admin-password"})
             admin = {"Authorization":"Bearer "+login.json()["access_token"]}
             created = client.post("/api/admin/tenants", headers=admin, json={"full_name":"Calendar Tenant",
-                "email":"calendar@example.com","room":"C1","move_in_date":"2027-01-01","weekly_rent":100})
+                "email":"calendar@example.com","room":"C1","move_in_date":"2027-01-01","monthly_rent":100})
             self.assertEqual(created.status_code,200,created.text)
             tenant_id = created.json()["id"]
             invalid = client.post("/api/auth/register",json={"full_name":"Calendar Tenant","email":"calendar@example.com",
@@ -71,7 +71,7 @@ class PaymentFlow(unittest.TestCase):
                 response = client.post("/api/admin/tenants", headers=admin, json={
                     "full_name": f"Bulk Tenant {number}", "email": f"bulk{number}@example.com", "phone": "0400000000",
                     "current_address": "Perth", "room": str(number), "move_in_date": "2026-01-01",
-                    "weekly_rent": rent, "reference_name": "Ref Person"})
+                    "monthly_rent": rent, "reference_name": "Ref Person"})
                 self.assertEqual(response.status_code, 200, response.text)
                 ids.append(response.json()["id"])
             self.assertEqual(client.get(f"/api/admin/tenants/{ids[0]}").status_code, 401)
@@ -94,7 +94,7 @@ class PaymentFlow(unittest.TestCase):
             admin = {"Authorization": "Bearer " + response.json()["access_token"]}
             created = client.post("/api/admin/tenants", headers=admin, json={
                 "full_name": "Example Tenant", "email": "tenant@example.com", "room": "A1",
-                "move_in_date": "2026-01-01", "weekly_rent": 200})
+                "move_in_date": "2026-01-01", "monthly_rent": 200})
             self.assertEqual(created.status_code, 200, created.text)
             tenant_id = created.json()["id"]
             invite = next(body for _, subject, body in sent if subject == "Your registration code")

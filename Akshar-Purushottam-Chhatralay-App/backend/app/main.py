@@ -59,7 +59,8 @@ class Tenant(Base):
     current_address: Mapped[str] = mapped_column(Text, default="")
     room: Mapped[str] = mapped_column(String(80))
     move_in_date: Mapped[date] = mapped_column(Date)
-    weekly_rent: Mapped[float] = mapped_column(Numeric(10,2))
+    # The database column keeps its old name so existing Neon data is preserved.
+    monthly_rent: Mapped[float] = mapped_column("weekly_rent", Numeric(10,2))
     bond_amount: Mapped[float] = mapped_column(Numeric(10,2), default=0)
     reference_name: Mapped[str] = mapped_column(String(150), default="")
     reference_phone: Mapped[str] = mapped_column(String(40), default="")
@@ -306,7 +307,7 @@ class TenantIn(BaseModel):
     full_name: str; email: EmailStr; phone: str=""; current_address: str=""; room: str=""
     unique_number: str=Field(default="",max_length=50,pattern=r"^$|^[A-Za-z0-9-]{3,50}$")
     allocated_seva: str=Field(default="",max_length=180)
-    move_in_date: date; weekly_rent: float=Field(ge=0); bond_amount: float=0
+    move_in_date: date; monthly_rent: float=Field(ge=0); bond_amount: float=0
     account_role: str = Field(default="tenant", pattern=r"^(tenant|admin|tenant_admin)$")
     reference_name: str=""; reference_phone: str=""; reference_email: str=""
     date_of_birth: Optional[date]=None; parent_phone: str=""; university_name: str=""; course_name: str=""
@@ -470,7 +471,7 @@ def me(user:User=Depends(current_user),db:Session=Depends(db_session)):
         tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id))
         if tenant:
             charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant.id).order_by(RentCharge.due_date.desc())).all()
-            base["tenant"]={"id":tenant.id,"room":tenant.room,"weekly_rent":float(tenant.weekly_rent),"balance":sum(float(c.amount)-float(c.amount_paid) for c in charges),"charges":[{"id":c.id,"due_date":c.due_date,"amount":float(c.amount),"paid":float(c.amount_paid),"balance":float(c.amount)-float(c.amount_paid)} for c in charges]}
+            base["tenant"]={"id":tenant.id,"room":tenant.room,"monthly_rent":float(tenant.monthly_rent),"balance":sum(float(c.amount)-float(c.amount_paid) for c in charges),"charges":[{"id":c.id,"due_date":c.due_date,"amount":float(c.amount),"paid":float(c.amount_paid),"balance":float(c.amount)-float(c.amount_paid)} for c in charges]}
     return base
 
 @app.get("/api/admin/dashboard")
@@ -480,7 +481,7 @@ def dashboard(_:User=Depends(admin),db:Session=Depends(db_session)):
     for t in tenants:
         charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==t.id)).all()
         balance=sum(float(c.amount)-float(c.amount_paid) for c in charges)
-        rows.append({"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,"registered":bool(t.user_id),"weekly_rent":float(t.weekly_rent),"balance":balance})
+        rows.append({"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,"registered":bool(t.user_id),"monthly_rent":float(t.monthly_rent),"balance":balance})
     return {"tenants":rows,"pending":[r for r in rows if r["balance"]>0],"total_outstanding":sum(r["balance"] for r in rows)}
 
 def tenant_profile(tenant:Tenant, db:Session):
@@ -492,7 +493,7 @@ def tenant_profile(tenant:Tenant, db:Session):
             "date_of_birth":tenant.date_of_birth,"parent_phone":tenant.parent_phone,
             "university_name":tenant.university_name,"course_name":tenant.course_name,
             "graduation_month":tenant.graduation_month,"referee_location":tenant.referee_location,
-            "weekly_rent":float(tenant.weekly_rent),"bond_amount":float(tenant.bond_amount),
+            "monthly_rent":float(tenant.monthly_rent),"bond_amount":float(tenant.bond_amount),
             "reference_name":tenant.reference_name,"reference_phone":tenant.reference_phone,
             "reference_email":tenant.reference_email,"is_active":tenant.is_active,"registered":bool(tenant.user_id),
             "account_role":tenant.account_role,"has_photo":bool(tenant.photo),
@@ -539,7 +540,7 @@ def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
     output=io.StringIO()
     columns=["Unique number","Status","Registered","Role","Name","Allocated seva","Email","Mobile number","Date of birth",
         "Parent mobile","Home address","Arrival date","University","Course","Graduation month",
-        "Referee name","Referee contact","Referee location","Room","Weekly rent AUD",
+        "Referee name","Referee contact","Referee location","Room","Monthly rent AUD",
         "Bond AUD","Total charged AUD","Total paid AUD","Outstanding AUD"]
     writer=csv.writer(output); writer.writerow(columns)
     def cell(value):
@@ -552,7 +553,7 @@ def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
         writer.writerow([cell(x) for x in (t.unique_number,"Active" if t.is_active else "Archived",bool(t.user_id),t.account_role,
             t.full_name,t.allocated_seva,t.email,t.phone,t.date_of_birth,t.parent_phone,t.current_address,t.move_in_date,
             t.university_name,t.course_name,t.graduation_month,t.reference_name,t.reference_phone,
-            t.referee_location,t.room,t.weekly_rent,t.bond_amount,total,paid,total-paid)])
+            t.referee_location,t.room,t.monthly_rent,t.bond_amount,total,paid,total-paid)])
     return Response(content="\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition":"attachment; filename=apc-tenants-all.csv","Cache-Control":"private, no-store"})
 
@@ -568,7 +569,8 @@ def summary_pdf(year:int,user:User=Depends(admin),db:Session=Depends(db_session)
     from reportlab.lib.units import mm
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+    from xml.sax.saxutils import escape
 
     start,end=date(year,1,1),date(year+1,1,1)
     tenants=db.scalars(select(Tenant).where(Tenant.is_active==True,Tenant.account_role!="admin").order_by(Tenant.full_name)).all()
@@ -607,14 +609,22 @@ def summary_pdf(year:int,user:User=Depends(admin),db:Session=Depends(db_session)
         ("FONTNAME",(0,0),(-1,0),"APC-Bold"),("FONTNAME",(0,1),(-1,1),"APC-Bold"),
         ("FONTSIZE",(0,1),(-1,1),14),("ALIGN",(0,0),(-1,-1),"CENTER"),("GRID",(0,0),(-1,-1),0.5,colors.HexColor("#dddddd"))]))
     story += [table,Paragraph("Active member directory",heading)]
-    member_rows=[["Unique no.","Name","Mobile","Room","Allocated seva","Arrival","University / course"]]
+    cell=ParagraphStyle("Cell",parent=styles["BodyText"],fontName="APC-Regular",fontSize=8.2,leading=10.5,wordWrap="CJK")
+    label=ParagraphStyle("Label",parent=cell,fontName="APC-Bold",textColor=colors.HexColor("#7f1d1d"))
+    def p(value,style=cell): return Paragraph(escape(str(value or "-")),style)
     for t in tenants:
-        member_rows.append([t.unique_number or "",t.full_name,t.phone,t.room,t.allocated_seva,t.move_in_date.isoformat()," / ".join(x for x in (t.university_name,t.course_name) if x)])
-    members=Table(member_rows,repeatRows=1,colWidths=[25*mm,38*mm,28*mm,18*mm,42*mm,25*mm,78*mm])
-    members.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),"APC-Regular"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#fee2e2")),("FONTNAME",(0,0),(-1,0),"APC-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#cccccc")),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),8),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#fff7f7")])]))
-    story += [members,PageBreak(),Paragraph("Financial summary by active resident",heading)]
+        details=Table([
+            [p("Name",label),p(t.full_name),p("Unique number",label),p(t.unique_number)],
+            [p("Mobile",label),p(t.phone),p("Room",label),p(t.room)],
+            [p("Allocated seva",label),p(t.allocated_seva),p("Arrival",label),p(t.move_in_date.isoformat())],
+            [p("University",label),p(t.university_name),p("Course",label),p(t.course_name)],
+            [p("Email",label),p(t.email),p("Monthly rent",label),p(f"AUD {t.monthly_rent:,.2f}")],
+        ],colWidths=[30*mm,95*mm,30*mm,95*mm])
+        details.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),"APC-Regular"),("BACKGROUND",(0,0),(0,-1),colors.HexColor("#fee2e2")),("BACKGROUND",(2,0),(2,-1),colors.HexColor("#fee2e2")),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#d8b4b4")),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]))
+        story.append(KeepTogether([details,Spacer(1,3*mm)]))
+    story += [PageBreak(),Paragraph("Financial summary by active resident",heading)]
     finance=[["Unique no.","Name","Room",f"Collected in {year}","Outstanding"]]
-    for t in tenants: finance.append([t.unique_number or "",t.full_name,t.room,f"AUD {collected[t.id]:,.2f}",f"AUD {outstanding[t.id]:,.2f}"])
+    for t in tenants: finance.append([p(t.unique_number),p(t.full_name),p(t.room),p(f"AUD {collected[t.id]:,.2f}"),p(f"AUD {outstanding[t.id]:,.2f}")])
     finances=Table(finance,repeatRows=1,colWidths=[35*mm,70*mm,30*mm,50*mm,50*mm]);finances.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),"APC-Regular"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#b91c1c")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"APC-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#cccccc")),("ALIGN",(3,1),(-1,-1),"RIGHT"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#fff7f7")])]))
     story += [finances,Paragraph("Upcoming activities",heading)]
     if upcoming:
@@ -739,7 +749,7 @@ def add_tenant(data:TenantIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Sess
     requested=data.unique_number.strip().upper()
     if requested and (db.scalar(select(Tenant.id).where(func.lower(Tenant.unique_number)==requested.lower())) or db.scalar(select(User.id).where(func.lower(User.unique_number)==requested.lower()))):
         raise HTTPException(409,"This unique number is already in use")
-    if data.account_role!="admin" and data.weekly_rent<=0: raise HTTPException(400,"Weekly rent is required for a tenant")
+    if data.account_role!="admin" and data.monthly_rent<=0: raise HTTPException(400,"Monthly rent is required for a tenant")
     values=data.model_dump();values["unique_number"]=requested or None
     tenant=Tenant(**values); tenant.email=data.email.lower(); db.add(tenant); db.flush()
     if not tenant.unique_number: tenant.unique_number=f"APC{tenant.id:06d}"
@@ -781,7 +791,7 @@ def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:
     if not tenants: raise HTTPException(400,"Add an active tenant first")
     if db.get(BulkRentRun,data.due_date): raise HTTPException(409,"Rent charges for this date were already created for all tenants")
     db.add(BulkRentRun(due_date=data.due_date))
-    charges=[RentCharge(tenant_id=t.id,due_date=data.due_date,amount=t.weekly_rent,
+    charges=[RentCharge(tenant_id=t.id,due_date=data.due_date,amount=t.monthly_rent,
                            note="Rent due on "+data.due_date.isoformat()) for t in tenants]
     db.add_all(charges)
     try: db.commit()
@@ -790,7 +800,7 @@ def charge_all(data:BulkChargeIn,tasks:BackgroundTasks,_:User=Depends(admin),db:
         raise HTTPException(409,"Rent charges for this date were already created for all tenants")
     for t,c in zip(tenants,charges):
         notify_calendar(db,tasks,t,"rent",c.id,"Rent due",data.due_date,
-               f"Hi {t.full_name}, rent of AUD {t.weekly_rent:.2f} is due on {data.due_date}. Add the attached calendar event.")
+               f"Hi {t.full_name}, monthly rent of AUD {t.monthly_rent:.2f} is due on {data.due_date}. Add the attached calendar event.")
     return {"created":len(tenants),"due_date":data.due_date}
 
 @app.patch("/api/admin/charges/{charge_id}")

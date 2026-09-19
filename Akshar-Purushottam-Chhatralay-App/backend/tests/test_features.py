@@ -75,7 +75,7 @@ class FeatureFlow(unittest.TestCase):
         tomorrow = (datetime.now(ZoneInfo("Australia/Perth")) + timedelta(days=1)).date().isoformat()
         response = self.client.post("/api/admin/tenants", headers=admin, json={
             "full_name": "New Tenant", "email": "tenant@example.com", "move_in_date": "2025-01-01",
-            "weekly_rent": 250, "graduation_month": "2027-11", "parent_phone": "0400000000"})
+            "monthly_rent": 250, "graduation_month": "2027-11", "parent_phone": "0400000000"})
         self.assertEqual(response.status_code, 200, response.text)
         tenant_id = response.json()["id"]
         sent_code = next(message for message in self.emails if message[1] == "Your registration code")
@@ -173,7 +173,7 @@ class FeatureFlow(unittest.TestCase):
 
         def create(role,email,rent):
             created=self.client.post("/api/admin/tenants",headers=admin,json={"full_name":email,
-                "email":email,"move_in_date":"2025-01-01","weekly_rent":rent,"account_role":role})
+                "email":email,"move_in_date":"2025-01-01","monthly_rent":rent,"account_role":role})
             self.assertEqual(created.status_code,200,created.text)
             code=re.search(r"\b\d{6}\b",next(msg[2] for msg in reversed(self.emails)
                 if msg[1]=="Your registration code" and email in msg[0])).group()
@@ -239,7 +239,7 @@ class FeatureFlow(unittest.TestCase):
         admin={"Authorization":"Bearer "+login.json()["access_token"]}
         with patch.object(self.main.secrets,"randbelow",return_value=123456):
             created=self.client.post("/api/admin/tenants",headers=admin,json={"full_name":"Email Correction",
-                "email":"mistyped@example.com","move_in_date":"2025-01-01","weekly_rent":200})
+                "email":"mistyped@example.com","move_in_date":"2025-01-01","monthly_rent":200})
         self.assertEqual(created.status_code,200,created.text)
         tenant_id=created.json()["id"]
         old_mail=next(m for m in reversed(self.emails) if m[1]=="Your registration code" and m[0]==["mistyped@example.com"])
@@ -264,7 +264,7 @@ class FeatureFlow(unittest.TestCase):
         admin={"Authorization":"Bearer "+admin_login.json()["access_token"]}
         created=self.client.post("/api/admin/tenants",headers=admin,json={"full_name":"Seva Tenant",
             "email":"seva@example.com","unique_number":"APC-SEVA-1","allocated_seva":"Kitchen",
-            "move_in_date":"2025-01-01","weekly_rent":210})
+            "move_in_date":"2025-01-01","monthly_rent":210})
         self.assertEqual(created.status_code,200,created.text)
         code=re.search(r"\b\d{6}\b",next(m[2] for m in reversed(self.emails)
             if m[1]=="Your registration code" and m[0]==["seva@example.com"])).group()

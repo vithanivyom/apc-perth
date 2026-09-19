@@ -59,6 +59,9 @@ input:focus,select:focus,textarea:focus{border-color:#b3223c}
 .login-card .brand{margin-bottom:25px}
 .login form{display:grid;gap:14px}
 .login p{color:#6c565b}
+.login-links{display:grid;gap:10px;margin-top:22px;padding-top:18px;border-top:1px solid #efdee2}
+.login-links .link{display:block;width:100%;padding:10px 12px;border:1px solid #e5cbd1;border-radius:10px;text-align:center;text-decoration:none;background:#fff9fa;font-weight:700}
+.login-links .link:hover{background:#feecef}
 .error{background:#fff0f1;color:#9e152c;border:1px solid #f3c9d0;padding:12px;border-radius:10px;margin:10px 0}
 .center{min-height:100vh;display:grid;place-items:center}
 .empty{text-align:center;padding:25px;color:#775e63}
