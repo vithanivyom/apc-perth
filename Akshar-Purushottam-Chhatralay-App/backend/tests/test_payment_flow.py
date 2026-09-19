@@ -117,7 +117,7 @@ class PaymentFlow(unittest.TestCase):
             self.assertEqual(claim.json()["state"], "pending")
             self.assertEqual(client.get("/api/me", headers=tenant).json()["tenant"]["balance"], 100)
             self.assertEqual(client.get(f"/api/admin/payments/{payment_id}/receipt", headers=tenant).status_code, 403)
-            self.assertEqual(client.get(f"/api/admin/payments/{payment_id}/receipt", headers=admin).status_code, 200)
+            self.assertEqual(client.get(f"/api/admin/payments/{payment_id}/receipt", headers=admin).status_code, 404)
             self.assertEqual(client.post(f"/api/admin/payments/{payment_id}/review", headers=admin, json={"decision": "approved"}).status_code, 200)
             self.assertEqual(client.get("/api/me", headers=tenant).json()["tenant"]["balance"], 40)
             self.assertEqual(client.post(f"/api/admin/payments/{payment_id}/review", headers=admin, json={"decision": "approved"}).status_code, 409)

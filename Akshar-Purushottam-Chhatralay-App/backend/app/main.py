@@ -19,7 +19,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, create_engine, func, select, inspect, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, create_engine, func, select, inspect, text, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -40,6 +40,7 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    unique_number: Mapped[Optional[str]] = mapped_column(String(50), unique=True, index=True, nullable=True)
     full_name: Mapped[str] = mapped_column(String(150))
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default="tenant", index=True)
@@ -52,6 +53,8 @@ class Tenant(Base):
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), unique=True, nullable=True)
     full_name: Mapped[str] = mapped_column(String(150))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    unique_number: Mapped[Optional[str]] = mapped_column(String(50), unique=True, index=True, nullable=True)
+    allocated_seva: Mapped[str] = mapped_column(String(180), default="")
     phone: Mapped[str] = mapped_column(String(40), default="")
     current_address: Mapped[str] = mapped_column(Text, default="")
     room: Mapped[str] = mapped_column(String(80))
@@ -165,6 +168,14 @@ class RegistrationInvite(Base):
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+class PasswordReset(Base):
+    __tablename__ = "password_resets"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
 class ReminderDelivery(Base):
     __tablename__ = "reminder_deliveries"
     __table_args__ = (UniqueConstraint("kind", "item_id", "tenant_id", name="uq_reminder_item_tenant"),)
@@ -236,23 +247,29 @@ def send_email(recipients: list[str], subject: str, body: str, attachment: Optio
             logging.exception("Notification delivery failed for %s", recipient)
     return success
 
-def notify(db: Session, tasks: BackgroundTasks, recipients: list[str], subject: str, body: str):
+def staff_emails(db:Session, include_admin_only:bool=False):
+    roles=("admin","tenant_admin") if include_admin_only else ("tenant_admin",)
+    return [a.email for a in db.scalars(select(User).where(User.role.in_(roles),User.is_active==True))]
+
+def notify(db: Session, tasks: BackgroundTasks, recipients: list[str], subject: str, body: str, include_admin_only:bool=False):
     extra = db.scalars(select(NotificationRecipient)).all()
-    admins=db.scalars(select(User).where(User.role.in_(("admin","tenant_admin")),User.is_active==True)).all()
-    tasks.add_task(send_email, recipients + [a.email for a in admins] + [r.email for r in extra], subject, body)
+    admin_only={x.lower() for x in staff_emails(db,True)}-{x.lower() for x in staff_emails(db,False)}
+    extra_emails=[r.email for r in extra if include_admin_only or r.email.lower() not in admin_only]
+    tasks.add_task(send_email, recipients + staff_emails(db,include_admin_only) + extra_emails, subject, body)
 
 def notify_calendar(db:Session,tasks:BackgroundTasks,tenant:Tenant,kind:str,item_id:int,title:str,when:date,body:str,staff_copy:bool=True):
     tasks.add_task(send_email,[tenant.email],title,body,calendar_file(kind,item_id,tenant.id,title,when,body))
     if staff_copy:
-        tasks.add_task(send_email,[a.email for a in db.scalars(select(User).where(User.role.in_(("admin","tenant_admin")),User.is_active==True))] +
-            [r.email for r in db.scalars(select(NotificationRecipient))],title,f"{tenant.full_name}: {body}")
+        admin_only={x.lower() for x in staff_emails(db,True)}-{x.lower() for x in staff_emails(db,False)}
+        tasks.add_task(send_email,staff_emails(db) +
+            [r.email for r in db.scalars(select(NotificationRecipient)) if r.email.lower() not in admin_only],title,f"{tenant.full_name}: {body}")
 
 def payment_json(p: PaymentSubmission, tenant: Tenant):
     return {"id": p.id, "tenant_id": tenant.id, "tenant_name": tenant.full_name,
             "tenant_email": tenant.email, "submitted_name": p.submitted_name,
             "amount": float(p.amount), "payment_date": p.payment_date,
             "bank_reference": p.bank_reference, "bank_details": p.bank_details,
-            "has_receipt": bool(p.receipt), "state": p.state,
+            "state": p.state,
             "submitted_at": p.submitted_at, "reviewed_at": p.reviewed_at,
             "review_note": p.review_note}
 
@@ -287,6 +304,8 @@ class RegisterIn(BaseModel):
     invite_code: str
 class TenantIn(BaseModel):
     full_name: str; email: EmailStr; phone: str=""; current_address: str=""; room: str=""
+    unique_number: str=Field(default="",max_length=50,pattern=r"^$|^[A-Za-z0-9-]{3,50}$")
+    allocated_seva: str=Field(default="",max_length=180)
     move_in_date: date; weekly_rent: float=Field(ge=0); bond_amount: float=0
     account_role: str = Field(default="tenant", pattern=r"^(tenant|admin|tenant_admin)$")
     reference_name: str=""; reference_phone: str=""; reference_email: str=""
@@ -306,6 +325,9 @@ class TenantProfileUpdate(BaseModel):
     reference_name: str = Field(default="",max_length=150)
     reference_phone: str = Field(default="",max_length=40)
     referee_location: str = Field(default="",max_length=150)
+    allocated_seva: str = Field(default="",max_length=180)
+class TenantEmailCorrection(BaseModel):
+    email: EmailStr
 class ChargeIn(BaseModel):
     tenant_id: int; due_date: date; amount: float=Field(gt=0); note: str=""
 class BulkChargeIn(BaseModel):
@@ -328,6 +350,12 @@ class PersonalEmailIn(BaseModel):
 class PasswordChangeIn(BaseModel):
     old_password: str
     new_password: str = Field(min_length=12)
+class PasswordResetRequest(BaseModel):
+    identifier: str = Field(min_length=3,max_length=255)
+class PasswordResetConfirm(BaseModel):
+    identifier: str = Field(min_length=3,max_length=255)
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    new_password: str = Field(min_length=12)
 
 @app.on_event("startup")
 def startup():
@@ -337,17 +365,29 @@ def startup():
     fields={"date_of_birth":"DATE", "parent_phone":"VARCHAR(40) DEFAULT '' NOT NULL",
         "university_name":"VARCHAR(150) DEFAULT '' NOT NULL", "course_name":"VARCHAR(150) DEFAULT '' NOT NULL",
         "graduation_month":"VARCHAR(7) DEFAULT '' NOT NULL", "referee_location":"VARCHAR(150) DEFAULT '' NOT NULL",
-        "account_role":"VARCHAR(20) DEFAULT 'tenant' NOT NULL", "photo":"BYTEA", "photo_type":"VARCHAR(30)"}
+        "account_role":"VARCHAR(20) DEFAULT 'tenant' NOT NULL", "photo":"BYTEA", "photo_type":"VARCHAR(30)",
+        "unique_number":"VARCHAR(50)", "allocated_seva":"VARCHAR(180) DEFAULT '' NOT NULL"}
     with engine.begin() as connection:
         for name,definition in fields.items():
             if name not in existing: connection.execute(text(f"ALTER TABLE tenants ADD COLUMN {name} {definition}"))
         invite_columns={c["name"] for c in inspect(connection).get_columns("registration_invites")}
         if "failed_attempts" not in invite_columns: connection.execute(text("ALTER TABLE registration_invites ADD COLUMN failed_attempts INTEGER DEFAULT 0 NOT NULL"))
         if "last_sent_at" not in invite_columns: connection.execute(text("ALTER TABLE registration_invites ADD COLUMN last_sent_at TIMESTAMP WITH TIME ZONE"))
+        user_columns={c["name"] for c in inspect(connection).get_columns("users")}
+        if "unique_number" not in user_columns: connection.execute(text("ALTER TABLE users ADD COLUMN unique_number VARCHAR(50)"))
     with SessionLocal() as db:
         if not db.scalar(select(User).where(User.email == ADMIN_EMAIL)):
             db.add(User(email=ADMIN_EMAIL, full_name="Administrator", password_hash=pwd.hash(ADMIN_PASSWORD), role="admin"))
-            db.commit()
+            db.flush()
+        for tenant in db.scalars(select(Tenant).where(Tenant.unique_number==None)):
+            tenant.unique_number=f"APC{tenant.id:06d}"
+        for user in db.scalars(select(User).where(User.unique_number==None)):
+            tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id))
+            user.unique_number=tenant.unique_number if tenant else f"ADM{user.id:06d}"
+        db.commit()
+    with engine.begin() as connection:
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_tenants_unique_number ON tenants (unique_number)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_unique_number ON users (unique_number)"))
 
 @app.get("/api/health")
 def health(): return {"status":"ok"}
@@ -366,16 +406,51 @@ def register(data:RegisterIn, tasks:BackgroundTasks, db:Session=Depends(db_sessi
     if not (len(data.invite_code)==6 and data.invite_code.isascii() and data.invite_code.isdecimal() and secrets.compare_digest(invite.token_hash,hashlib.sha256(data.invite_code.encode()).hexdigest())):
         invite.failed_attempts+=1; db.commit()
         raise HTTPException(403,"Invalid code. Ask the admin to resend it after five failed attempts.")
-    user=User(email=email,full_name=tenant.full_name,password_hash=pwd.hash(data.password),role=tenant.account_role)
+    user=User(email=email,unique_number=tenant.unique_number,full_name=tenant.full_name,password_hash=pwd.hash(data.password),role=tenant.account_role)
     db.add(user); db.flush(); tenant.user_id=user.id; db.delete(invite); db.commit()
     notify(db,tasks,[tenant.email],"Tenant account created",f"{tenant.full_name} registered their tenant account.")
     return {"access_token":token_for(user),"token_type":"bearer","role":user.role}
 
 @app.post("/api/auth/login")
 def login(form:OAuth2PasswordRequestForm=Depends(), db:Session=Depends(db_session)):
-    user=db.scalar(select(User).where(func.lower(User.email)==form.username.lower()))
-    if not user or not user.is_active or not pwd.verify(form.password,user.password_hash): raise HTTPException(401,"Incorrect email or password or inactive account")
+    identifier=form.username.strip().lower()
+    user=db.scalar(select(User).where(or_(func.lower(User.email)==identifier,func.lower(User.unique_number)==identifier)))
+    if not user or not user.is_active or not pwd.verify(form.password,user.password_hash): raise HTTPException(401,"Incorrect email/unique number or password, or inactive account")
     return {"access_token":token_for(user),"token_type":"bearer","role":user.role,"name":user.full_name}
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(data:PasswordResetRequest,tasks:BackgroundTasks,db:Session=Depends(db_session)):
+    identifier=data.identifier.strip().lower()
+    user=db.scalar(select(User).where(or_(func.lower(User.email)==identifier,func.lower(User.unique_number)==identifier)))
+    generic={"ok":True,"message":"If that account exists, a six-digit reset code has been emailed."}
+    if not user or not user.is_active: return generic
+    if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"): raise HTTPException(503,"Email is not configured")
+    row=db.get(PasswordReset,user.id); now=datetime.now(timezone.utc)
+    last=row.last_sent_at if row else None
+    if last and (last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last)>now-timedelta(minutes=1): return generic
+    code=f"{secrets.randbelow(1000000):06d}"
+    if row is None:
+        row=PasswordReset(user_id=user.id,code_hash="",expires_at=now);db.add(row)
+    row.code_hash=hashlib.sha256(code.encode()).hexdigest();row.expires_at=now+timedelta(minutes=15)
+    row.failed_attempts=0;row.last_sent_at=now;db.commit()
+    tasks.add_task(send_email,[user.email],"Password reset code",f"Your six-digit password reset code is {code}. It expires in 15 minutes.")
+    return generic
+
+@app.post("/api/auth/reset-password")
+def reset_password(data:PasswordResetConfirm,tasks:BackgroundTasks,db:Session=Depends(db_session)):
+    identifier=data.identifier.strip().lower()
+    user=db.scalar(select(User).where(or_(func.lower(User.email)==identifier,func.lower(User.unique_number)==identifier)))
+    if not user: raise HTTPException(400,"Invalid or expired reset code")
+    row=db.get(PasswordReset,user.id); now=datetime.now(timezone.utc)
+    expires=row.expires_at if row else None
+    if expires and expires.tzinfo is None: expires=expires.replace(tzinfo=timezone.utc)
+    if not row or expires<now or row.failed_attempts>=5: raise HTTPException(400,"Invalid or expired reset code")
+    valid=secrets.compare_digest(row.code_hash,hashlib.sha256(data.code.encode()).hexdigest())
+    if not valid:
+        row.failed_attempts+=1;db.commit();raise HTTPException(400,"Invalid or expired reset code")
+    user.password_hash=pwd.hash(data.new_password);db.delete(row);db.commit()
+    tasks.add_task(send_email,[user.email],"Password changed","Your Chhatralay account password was changed. If this was not you, contact the administrator immediately.")
+    return {"ok":True}
 
 @app.post("/api/auth/refresh")
 def refresh(user:User=Depends(current_user)):
@@ -390,7 +465,7 @@ def change_password(data:PasswordChangeIn,user:User=Depends(current_user),db:Ses
 
 @app.get("/api/me")
 def me(user:User=Depends(current_user),db:Session=Depends(db_session)):
-    base={"id":user.id,"name":user.full_name,"email":user.email,"role":user.role}
+    base={"id":user.id,"name":user.full_name,"email":user.email,"unique_number":user.unique_number,"role":user.role}
     if user.role in ("tenant","tenant_admin"):
         tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id))
         if tenant:
@@ -411,7 +486,8 @@ def dashboard(_:User=Depends(admin),db:Session=Depends(db_session)):
 def tenant_profile(tenant:Tenant, db:Session):
     charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant.id).order_by(RentCharge.due_date.desc(),RentCharge.id.desc())).all()
     payments=db.scalars(select(PaymentSubmission).where(PaymentSubmission.tenant_id==tenant.id).order_by(PaymentSubmission.id.desc())).all()
-    return {"id":tenant.id,"full_name":tenant.full_name,"email":tenant.email,"phone":tenant.phone,
+    return {"id":tenant.id,"full_name":tenant.full_name,"email":tenant.email,"unique_number":tenant.unique_number,
+            "allocated_seva":tenant.allocated_seva,"phone":tenant.phone,
             "current_address":tenant.current_address,"room":tenant.room,"move_in_date":tenant.move_in_date,
             "date_of_birth":tenant.date_of_birth,"parent_phone":tenant.parent_phone,
             "university_name":tenant.university_name,"course_name":tenant.course_name,
@@ -427,7 +503,7 @@ def tenant_profile(tenant:Tenant, db:Session):
 def collections(year:int, _:User=Depends(admin),db:Session=Depends(db_session)):
     if year<2000 or year>2100: raise HTTPException(400,"Choose a year between 2000 and 2100")
     start,end=date(year,1,1),date(year+1,1,1)
-    tenants=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
+    tenants=db.scalars(select(Tenant).where(Tenant.account_role!="admin").order_by(Tenant.full_name,Tenant.id)).all()
     amounts={t.id:Decimal("0.00") for t in tenants}
     for p in db.scalars(select(PaymentSubmission).where(PaymentSubmission.state=="approved",PaymentSubmission.payment_date>=start,PaymentSubmission.payment_date<end)):
         amounts[p.tenant_id]+=p.amount
@@ -451,16 +527,17 @@ def collections(year:int, _:User=Depends(admin),db:Session=Depends(db_session)):
 
 @app.get("/api/admin/tenants")
 def list_tenants(_:User=Depends(admin),db:Session=Depends(db_session)):
-    tenants=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
+    tenants=db.scalars(select(Tenant).where(Tenant.account_role!="admin").order_by(Tenant.full_name,Tenant.id)).all()
     return [{"id":t.id,"name":t.full_name,"email":t.email,"room":t.room,
+             "unique_number":t.unique_number,"allocated_seva":t.allocated_seva,
              "is_active":t.is_active,"registered":bool(t.user_id),"account_role":t.account_role} for t in tenants]
 
 @app.get("/api/admin/tenants/report.csv")
 def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
     """One row per tenant, including archived tenants and financial totals."""
-    rows=db.scalars(select(Tenant).order_by(Tenant.full_name,Tenant.id)).all()
+    rows=db.scalars(select(Tenant).where(Tenant.account_role!="admin").order_by(Tenant.full_name,Tenant.id)).all()
     output=io.StringIO()
-    columns=["Tenant number","Status","Registered","Role","Name","Email","Mobile number","Date of birth",
+    columns=["Unique number","Status","Registered","Role","Name","Allocated seva","Email","Mobile number","Date of birth",
         "Parent mobile","Home address","Arrival date","University","Course","Graduation month",
         "Referee name","Referee contact","Referee location","Room","Weekly rent AUD",
         "Bond AUD","Total charged AUD","Total paid AUD","Outstanding AUD"]
@@ -472,12 +549,80 @@ def tenant_csv(_:User=Depends(admin),db:Session=Depends(db_session)):
         charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==t.id)).all()
         total=sum((c.amount for c in charges),Decimal("0.00"))
         paid=sum((c.amount_paid for c in charges),Decimal("0.00"))
-        writer.writerow([cell(x) for x in (t.id,"Active" if t.is_active else "Archived",bool(t.user_id),t.account_role,
-            t.full_name,t.email,t.phone,t.date_of_birth,t.parent_phone,t.current_address,t.move_in_date,
+        writer.writerow([cell(x) for x in (t.unique_number,"Active" if t.is_active else "Archived",bool(t.user_id),t.account_role,
+            t.full_name,t.allocated_seva,t.email,t.phone,t.date_of_birth,t.parent_phone,t.current_address,t.move_in_date,
             t.university_name,t.course_name,t.graduation_month,t.reference_name,t.reference_phone,
             t.referee_location,t.room,t.weekly_rent,t.bond_amount,total,paid,total-paid)])
     return Response(content="\ufeff"+output.getvalue(),media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition":"attachment; filename=apc-tenants-all.csv","Cache-Control":"private, no-store"})
+
+@app.get("/api/admin/summary.pdf")
+def summary_pdf(year:int,user:User=Depends(admin),db:Session=Depends(db_session)):
+    """Build an on-demand report; no PDF or summary snapshot is stored in the database."""
+    if year<2000 or year>2100: raise HTTPException(400,"Choose a year between 2000 and 2100")
+    from reportlab.lib import colors
+    import reportlab
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+
+    start,end=date(year,1,1),date(year+1,1,1)
+    tenants=db.scalars(select(Tenant).where(Tenant.is_active==True,Tenant.account_role!="admin").order_by(Tenant.full_name)).all()
+    collected={t.id:Decimal("0.00") for t in tenants}
+    for payment in db.scalars(select(PaymentSubmission).where(PaymentSubmission.state=="approved",PaymentSubmission.payment_date>=start,PaymentSubmission.payment_date<end)):
+        if payment.tenant_id in collected: collected[payment.tenant_id]+=payment.amount
+    for payment in db.scalars(select(ManualPayment).where(ManualPayment.payment_date>=start,ManualPayment.payment_date<end)):
+        if payment.tenant_id in collected: collected[payment.tenant_id]+=payment.amount
+    for item in db.scalars(select(ArchivedCollection).where(ArchivedCollection.year==year)):
+        if item.tenant_id in collected: collected[item.tenant_id]+=item.amount
+    outstanding={}
+    for tenant in tenants:
+        charges=db.scalars(select(RentCharge).where(RentCharge.tenant_id==tenant.id)).all()
+        outstanding[tenant.id]=sum((max(Decimal("0.00"),c.amount-c.amount_paid) for c in charges),Decimal("0.00"))
+    pending=db.scalar(select(func.count(PaymentSubmission.id)).join(Tenant,PaymentSubmission.tenant_id==Tenant.id).where(PaymentSubmission.state=="pending",Tenant.account_role!="admin")) or 0
+    upcoming=db.scalars(select(Activity).where(Activity.activity_date>=datetime.now(PERTH).date()).order_by(Activity.activity_date).limit(10)).all()
+
+    font_dir=os.path.join(os.path.dirname(reportlab.__file__),"fonts")
+    pdfmetrics.registerFont(TTFont("APC-Regular",os.path.join(font_dir,"Vera.ttf")))
+    pdfmetrics.registerFont(TTFont("APC-Bold",os.path.join(font_dir,"VeraBd.ttf")))
+    pdfmetrics.registerFont(TTFont("APC-Italic",os.path.join(font_dir,"VeraIt.ttf")))
+    buffer=io.BytesIO();styles=getSampleStyleSheet()
+    for style in styles.byName.values(): style.fontName="APC-Regular"
+    styles["Title"].fontName=styles["Heading2"].fontName=styles["Heading3"].fontName="APC-Bold"
+    styles["Italic"].fontName="APC-Italic"
+    title=ParagraphStyle("ReportTitle",parent=styles["Title"],fontName="APC-Bold",textColor=colors.HexColor("#b91c1c"),alignment=TA_CENTER,spaceAfter=6*mm)
+    heading=ParagraphStyle("ReportHeading",parent=styles["Heading2"],fontName="APC-Bold",textColor=colors.HexColor("#991b1b"),spaceBefore=4*mm,spaceAfter=2*mm)
+    doc=SimpleDocTemplate(buffer,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=12*mm,
+        title=f"Chhatralay summary {year}",author="Akshar Purushottam Chhatralay")
+    story=[Paragraph("Akshar Purushottam Chhatralay",title),Paragraph(f"Administrative summary · 1 January {year} to 31 December {year}",styles["Heading3"]),Spacer(1,3*mm)]
+    overview=[["Active residents","Collected","Outstanding","Pending reviews"],
+        [str(len(tenants)),f"AUD {sum(collected.values()):,.2f}",f"AUD {sum(outstanding.values()):,.2f}",str(pending)]]
+    table=Table(overview,colWidths=[60*mm]*4,rowHeights=[9*mm,12*mm]);table.setStyle(TableStyle([
+        ("FONTNAME",(0,0),(-1,-1),"APC-Regular"),
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#b91c1c")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"APC-Bold"),("FONTNAME",(0,1),(-1,1),"APC-Bold"),
+        ("FONTSIZE",(0,1),(-1,1),14),("ALIGN",(0,0),(-1,-1),"CENTER"),("GRID",(0,0),(-1,-1),0.5,colors.HexColor("#dddddd"))]))
+    story += [table,Paragraph("Active member directory",heading)]
+    member_rows=[["Unique no.","Name","Mobile","Room","Allocated seva","Arrival","University / course"]]
+    for t in tenants:
+        member_rows.append([t.unique_number or "",t.full_name,t.phone,t.room,t.allocated_seva,t.move_in_date.isoformat()," / ".join(x for x in (t.university_name,t.course_name) if x)])
+    members=Table(member_rows,repeatRows=1,colWidths=[25*mm,38*mm,28*mm,18*mm,42*mm,25*mm,78*mm])
+    members.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),"APC-Regular"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#fee2e2")),("FONTNAME",(0,0),(-1,0),"APC-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#cccccc")),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),8),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#fff7f7")])]))
+    story += [members,PageBreak(),Paragraph("Financial summary by active resident",heading)]
+    finance=[["Unique no.","Name","Room",f"Collected in {year}","Outstanding"]]
+    for t in tenants: finance.append([t.unique_number or "",t.full_name,t.room,f"AUD {collected[t.id]:,.2f}",f"AUD {outstanding[t.id]:,.2f}"])
+    finances=Table(finance,repeatRows=1,colWidths=[35*mm,70*mm,30*mm,50*mm,50*mm]);finances.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),"APC-Regular"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#b91c1c")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"APC-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.HexColor("#cccccc")),("ALIGN",(3,1),(-1,-1),"RIGHT"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#fff7f7")])]))
+    story += [finances,Paragraph("Upcoming activities",heading)]
+    if upcoming:
+        acts=Table([["Date","Activity"]]+[[a.activity_date.isoformat(),a.title] for a in upcoming],repeatRows=1,colWidths=[40*mm,190*mm]);acts.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),"APC-Regular"),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#fee2e2")),("FONTNAME",(0,0),(-1,0),"APC-Bold"),("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#cccccc"))]));story.append(acts)
+    else: story.append(Paragraph("No upcoming activities.",styles["BodyText"]))
+    story += [Spacer(1,5*mm),Paragraph(f"Generated {datetime.now(PERTH):%d %B %Y, %I:%M %p} Perth time. This report was calculated live and was not saved in the database.",styles["Italic"])]
+    doc.build(story);content=buffer.getvalue()
+    return Response(content,media_type="application/pdf",headers={"Content-Disposition":f"attachment; filename=chhatralay-summary-{year}.pdf","Cache-Control":"private, no-store"})
 
 @app.get("/api/admin/tenants/{tenant_id}")
 def tenant_details(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
@@ -525,6 +670,30 @@ def edit_tenant(tenant_id:int,data:TenantProfileUpdate,_:User=Depends(admin),db:
     db.commit()
     return tenant_profile(tenant,db)
 
+@app.patch("/api/admin/tenants/{tenant_id}/login-email")
+def correct_tenant_email(tenant_id:int,data:TenantEmailCorrection,tasks:BackgroundTasks,
+                         _:User=Depends(admin),db:Session=Depends(db_session)):
+    tenant=db.get(Tenant,tenant_id)
+    if not tenant: raise HTTPException(404,"Tenant not found")
+    if tenant.user_id: raise HTTPException(409,"This account is registered; its login email cannot be changed here")
+    if not tenant.is_active: raise HTTPException(409,"Restore this tenant before sending a registration code")
+    if not os.getenv("RESEND_API_KEY") or not os.getenv("EMAIL_FROM"):
+        raise HTTPException(503,"Email is not configured")
+    email=str(data.email).strip().lower()
+    if email==tenant.email.lower(): raise HTTPException(400,"Email is unchanged; use Send verification code")
+    if db.scalar(select(Tenant.id).where(func.lower(Tenant.email)==email)) or db.scalar(select(User.id).where(func.lower(User.email)==email)):
+        raise HTTPException(409,"This email is already in use")
+    old_invite=db.get(RegistrationInvite,tenant.id)
+    if old_invite: db.delete(old_invite)
+    tenant.email=email
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,"This email is already in use")
+    invite_tenant(db,tasks,tenant)
+    return {"email":tenant.email,"message":"New verification code queued"}
+
 @app.post("/api/admin/tenants/{tenant_id}/archive")
 def archive_tenant(tenant_id:int,_:User=Depends(admin),db:Session=Depends(db_session)):
     tenant=db.scalar(select(Tenant).where(Tenant.id==tenant_id).with_for_update())
@@ -567,8 +736,14 @@ def add_tenant(data:TenantIn,tasks:BackgroundTasks,_:User=Depends(admin),db:Sess
         raise HTTPException(503,"Email is not configured. Set RESEND_API_KEY and EMAIL_FROM first.")
     if db.scalar(select(Tenant).where(func.lower(Tenant.email)==data.email.lower())): raise HTTPException(409,"Tenant email already exists")
     if db.scalar(select(User).where(func.lower(User.email)==data.email.lower())): raise HTTPException(409,"An account with this email already exists")
+    requested=data.unique_number.strip().upper()
+    if requested and (db.scalar(select(Tenant.id).where(func.lower(Tenant.unique_number)==requested.lower())) or db.scalar(select(User.id).where(func.lower(User.unique_number)==requested.lower()))):
+        raise HTTPException(409,"This unique number is already in use")
     if data.account_role!="admin" and data.weekly_rent<=0: raise HTTPException(400,"Weekly rent is required for a tenant")
-    tenant=Tenant(**data.model_dump()); tenant.email=data.email.lower(); db.add(tenant); db.commit(); db.refresh(tenant)
+    values=data.model_dump();values["unique_number"]=requested or None
+    tenant=Tenant(**values); tenant.email=data.email.lower(); db.add(tenant); db.flush()
+    if not tenant.unique_number: tenant.unique_number=f"APC{tenant.id:06d}"
+    db.commit(); db.refresh(tenant)
     invite_tenant(db,tasks,tenant)
     notify(db,tasks,[],"New tenant added",f"Tenant {tenant.full_name} was added. Sign in to review details.")
     return {"id":tenant.id}
@@ -641,7 +816,7 @@ def my_payments(user:User=Depends(current_user),db:Session=Depends(db_session)):
 
 @app.post("/api/payments")
 async def submit_payment(tasks:BackgroundTasks,amount:Decimal=Form(...),payment_date:date=Form(...),
-                         bank_reference:str=Form(...),bank_details:str=Form(""),receipt:Optional[UploadFile]=File(None),
+                         bank_reference:str=Form(...),bank_details:str=Form(""),
                          user:User=Depends(current_user),db:Session=Depends(db_session)):
     if user.role not in ("tenant","tenant_admin"): raise HTTPException(403,"Tenant access required")
     tenant=db.scalar(select(Tenant).where(Tenant.user_id==user.id,Tenant.is_active==True))
@@ -649,16 +824,8 @@ async def submit_payment(tasks:BackgroundTasks,amount:Decimal=Form(...),payment_
     if amount<=0 or amount>1000000 or amount.as_tuple().exponent < -2: raise HTTPException(400,"Enter a valid amount in dollars and cents")
     reference=bank_reference.strip()
     if not reference or len(reference)>120 or len(bank_details)>300: raise HTTPException(400,"Invalid bank reference or details")
-    photo=None; photo_type=None
-    if receipt and receipt.filename:
-        photo=await receipt.read(2*1024*1024+1)
-        if len(photo)>2*1024*1024: raise HTTPException(413,"Receipt must be under 2 MB")
-        if photo.startswith(b"\xff\xd8\xff"): photo_type="image/jpeg"
-        elif photo.startswith(b"\x89PNG\r\n\x1a\n"): photo_type="image/png"
-        elif photo[:4]==b"RIFF" and photo[8:12]==b"WEBP": photo_type="image/webp"
-        else: raise HTTPException(415,"Upload a JPG, PNG, or WebP image")
     payment=PaymentSubmission(tenant_id=tenant.id,submitted_name=tenant.full_name,amount=amount,
-        payment_date=payment_date,bank_reference=reference,bank_details=bank_details.strip(),receipt=photo,receipt_type=photo_type)
+        payment_date=payment_date,bank_reference=reference,bank_details=bank_details.strip())
     db.add(payment)
     try: db.commit()
     except IntegrityError:
@@ -702,7 +869,7 @@ def review_payment(payment_id:int,data:ReviewIn,tasks:BackgroundTasks,user:User=
     payment.reviewed_by=user.id
     payment.review_note=data.note
     db.commit()
-    notify(db,tasks,[tenant.email],f"Payment {data.decision}",f"Payment reference {payment.bank_reference} for AUD {payment.amount:.2f} was {data.decision}. {data.note} Sign in for the latest balance.")
+    notify(db,tasks,[tenant.email],f"Payment {data.decision}",f"Payment reference {payment.bank_reference} for AUD {payment.amount:.2f} was {data.decision}. {data.note} Sign in for the latest balance.",include_admin_only=data.decision=="approved")
     return {"ok":True}
 
 @app.get("/api/admin/notification-recipients")

@@ -1,11 +1,21 @@
 # Akshar Purushottam Chhatralay
 
+## Latest features
+
+- Each resident profile has a unique number and allocated seva. Residents can sign in with either the unique number or email.
+- Password recovery uses a six-digit code sent to the account email.
+- Admins can download an on-demand PDF summary for a selected January-to-December year. The PDF is not stored in PostgreSQL.
+- Rent payment submissions use bank transaction details only; new receipt images are not uploaded.
+- Admin-only profiles are excluded from resident dashboards, tenant exports, collections, voting participation and PDF summaries. They receive routine email only when a payment is approved (account verification, password recovery and explicitly addressed messages still work).
+- Detailed payment rows older than 365 days are consolidated by the existing scheduled cleanup, preserving yearly collection totals while reducing database storage.
+
 React frontend, FastAPI backend and PostgreSQL database. This update preserves existing tenant records and adds the requested features.
 
 ## Features
 
 - Admin downloads a private CSV with **active and archived tenants**, their personal details, rent totals and outstanding balances. CSV cells are protected against spreadsheet formula injection.
 - Upcoming activities show their details and poll. After the activity date passes in Perth, tenants see only a short record of activities they voted on (activity date, selected option and vote date). Admins see a compact poll tally and can expand each summary to see each tenant's choice, including **Not voted**. Voting closes after the activity date.
+- Before a tenant registers, admins can correct a mistyped email under **Tenants → tenant name → Correct email address**. Saving invalidates any earlier registration code and queues a new six-digit code for the corrected address. Registered accounts cannot have their login email changed through this form.
 - Sessions close after **15 minutes without mouse, keyboard, touch or scrolling**. While active, the frontend renews a 15-minute server token.
 - Registration uses a **six-digit email code** valid for 15 minutes. Five wrong attempts lock that code; admin can resend after one minute.
 - Every email includes a website link. Admin can email one tenant from **Tenants → name → Send personal email**.
@@ -42,4 +52,4 @@ Local calendar invitations link to `http://localhost:5173`; use `PUBLIC_FRONTEND
 
 **Tenants → name → Remove tenant** archives a tenant after all charges are paid and no payment submission is pending. Archived accounts cannot sign in but stay in CSV and collections and can be restored. Already registered accounts remain usable; prior registrations have no retroactive verification record. Only new registrations need the six-digit code.
 
-Collections cover 1 January through 31 December. Historical manual payments with no recorded payment date appear separately as undated instead of being assigned to a guessed year. Receipt images are private in PostgreSQL and capped at 2 MB; back up Neon and watch storage. The retention job uses the **submission/recorded timestamp**, not the entered payment date, and leaves annual totals and rent balances but permanently removes older bank references and receipt images. Backup/export required detailed transaction records before the first run. [Australian government guidance](https://business.gov.au/finance/payments-and-invoicing/record-keeping) says most business transaction records must be kept for five years; check which rules apply to this house and keep a separate secure archive where required. PostgreSQL storage may shrink only after vacuum and Neon space reclamation. Tenant password recovery and guaranteed email delivery require additional services. Rotate any Neon password shared in a message, then update `DATABASE_URL` in Render.
+Collections cover 1 January through 31 December. Historical manual payments with no recorded payment date appear separately as undated instead of being assigned to a guessed year. New payment submissions do not accept receipt images. The retention job uses the **submission/recorded timestamp**, not the entered payment date, and leaves annual totals and rent balances but permanently removes transaction-level details older than 365 days. Export any legally required detailed records before cleanup. [Australian government guidance](https://business.gov.au/finance/payments-and-invoicing/record-keeping) says most business transaction records must be kept for five years; check which rules apply to this house and keep a separate secure archive where required. PostgreSQL storage may shrink only after vacuum and Neon space reclamation. Password recovery requires working Resend settings; no email provider can guarantee delivery. Rotate any Neon password shared in a message, then update `DATABASE_URL` in Render.

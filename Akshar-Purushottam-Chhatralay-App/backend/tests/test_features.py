@@ -234,6 +234,55 @@ class FeatureFlow(unittest.TestCase):
         self.assertEqual(self.client.get("/api/me",headers=dual).json()["tenant"]["balance"],0)
         self.assertEqual(self.client.get("/api/payments",headers=dual).json(),[])
 
+    def test_unregistered_email_correction_replaces_code(self):
+        login=self.client.post("/api/auth/login",data={"username":"admin@example.com","password":"a-test-password"})
+        admin={"Authorization":"Bearer "+login.json()["access_token"]}
+        with patch.object(self.main.secrets,"randbelow",return_value=123456):
+            created=self.client.post("/api/admin/tenants",headers=admin,json={"full_name":"Email Correction",
+                "email":"mistyped@example.com","move_in_date":"2025-01-01","weekly_rent":200})
+        self.assertEqual(created.status_code,200,created.text)
+        tenant_id=created.json()["id"]
+        old_mail=next(m for m in reversed(self.emails) if m[1]=="Your registration code" and m[0]==["mistyped@example.com"])
+        old_code=re.search(r"\b\d{6}\b",old_mail[2]).group()
+        endpoint=f"/api/admin/tenants/{tenant_id}/login-email"
+        duplicate=self.client.patch(endpoint,headers=admin,json={"email":"existing@example.com"})
+        self.assertEqual(duplicate.status_code,409)
+        with patch.object(self.main.secrets,"randbelow",return_value=234567):
+            updated=self.client.patch(endpoint,headers=admin,json={"email":"corrected@example.com"})
+        self.assertEqual(updated.status_code,200,updated.text)
+        self.assertEqual(updated.json()["email"],"corrected@example.com")
+        new_mail=next(m for m in reversed(self.emails) if m[1]=="Your registration code" and m[0]==["corrected@example.com"])
+        new_code=re.search(r"\b\d{6}\b",new_mail[2]).group()
+        registration={"full_name":"Email Correction","email":"corrected@example.com","password":"a-secure-test-password"}
+        self.assertEqual(self.client.post("/api/auth/register",json={**registration,"invite_code":old_code}).status_code,403)
+        success=self.client.post("/api/auth/register",json={**registration,"invite_code":new_code})
+        self.assertEqual(success.status_code,200,success.text)
+        self.assertEqual(self.client.patch(endpoint,headers=admin,json={"email":"changed-again@example.com"}).status_code,409)
+
+    def test_unique_login_password_reset_and_summary_pdf(self):
+        admin_login=self.client.post("/api/auth/login",data={"username":"admin@example.com","password":"a-test-password"})
+        admin={"Authorization":"Bearer "+admin_login.json()["access_token"]}
+        created=self.client.post("/api/admin/tenants",headers=admin,json={"full_name":"Seva Tenant",
+            "email":"seva@example.com","unique_number":"APC-SEVA-1","allocated_seva":"Kitchen",
+            "move_in_date":"2025-01-01","weekly_rent":210})
+        self.assertEqual(created.status_code,200,created.text)
+        code=re.search(r"\b\d{6}\b",next(m[2] for m in reversed(self.emails)
+            if m[1]=="Your registration code" and m[0]==["seva@example.com"])).group()
+        registered=self.client.post("/api/auth/register",json={"full_name":"Seva Tenant","email":"seva@example.com",
+            "password":"first-password-123","invite_code":code})
+        self.assertEqual(registered.status_code,200,registered.text)
+        self.assertEqual(self.client.post("/api/auth/login",data={"username":"apc-seva-1","password":"first-password-123"}).status_code,200)
+        with patch.object(self.main.secrets,"randbelow",return_value=654321):
+            requested=self.client.post("/api/auth/forgot-password",json={"identifier":"APC-SEVA-1"})
+        self.assertEqual(requested.status_code,200,requested.text)
+        reset=self.client.post("/api/auth/reset-password",json={"identifier":"seva@example.com","code":"654321","new_password":"second-password-456"})
+        self.assertEqual(reset.status_code,200,reset.text)
+        self.assertEqual(self.client.post("/api/auth/login",data={"username":"APC-SEVA-1","password":"second-password-456"}).status_code,200)
+        summary=self.client.get(f"/api/admin/summary.pdf?year={datetime.now().year}",headers=admin)
+        self.assertEqual(summary.status_code,200,summary.text)
+        self.assertTrue(summary.content.startswith(b"%PDF"))
+        self.assertIn("attachment;",summary.headers["content-disposition"])
+
 
 if __name__ == "__main__":
     unittest.main()
